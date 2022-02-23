@@ -1,3 +1,0 @@
-[submodule ".devcontainer/unicorn"]
-	path = .devcontainer/unicorn
-	url = git@github.com:unicorn-engine/unicorn.git
