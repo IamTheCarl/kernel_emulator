@@ -1,12 +1,14 @@
 mod kernel;
 
-use kernel::System;
+use kernel::*;
 
 fn main() {
     let test_program = include_bytes!("../testing/hello_world.elf");
 
-    let mut system = System::new().unwrap();
+    let mut system = Kernel::new().unwrap();
 
-    system.load_elf(test_program).unwrap();
-    system.run().unwrap();
+    let executable = Kernel::load_elf(test_program).unwrap();
+    let exit_code = system.execute(&executable).unwrap();
+
+    println!("Exit code: {}", exit_code)
 }
