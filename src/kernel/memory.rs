@@ -5,7 +5,7 @@ use std::{
 };
 use thiserror::Error;
 use yaxpeax_arch::{Decoder, Reader, U8Reader};
-use yaxpeax_x86::long_mode::{InstDecoder, Instruction as YaxInstruction};
+use yaxpeax_x86::long_mode::{InstDecoder, Instruction};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -76,7 +76,7 @@ pub struct MemoryBlock {
     execute: bool,
     base_address: Pointer,
     data: Bytes,
-    instructions: Vec<YaxInstruction>,
+    instructions: Vec<Instruction>,
     instruction_addresses: HashMap<Pointer, usize>,
 }
 
@@ -124,7 +124,7 @@ impl MemoryBlock {
     pub fn instruction_iterator(
         &self,
         address: Pointer,
-    ) -> Option<impl Iterator<Item = &YaxInstruction>> {
+    ) -> Option<impl Iterator<Item = &Instruction>> {
         self.instruction_addresses
             .get(&address)
             .map(|first_instruction_index| self.instructions[*first_instruction_index..].iter())
@@ -157,7 +157,7 @@ impl DerefMut for MemoryBlock {
 fn decode_instructions(
     base_address: Pointer,
     bytes: &Bytes,
-) -> (HashMap<Pointer, usize>, Vec<YaxInstruction>) {
+) -> (HashMap<Pointer, usize>, Vec<Instruction>) {
     let decoder = InstDecoder::minimal();
 
     let mut block = U8Reader::new(bytes);
