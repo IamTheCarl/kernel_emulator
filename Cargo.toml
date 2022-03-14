@@ -9,4 +9,4 @@ syscalls = { version = "0.5.0", default-features = false }
 thiserror = "1.0.30"
 yaxpeax-x86 = "1.1.4"
 yaxpeax-arch = "0.2.7"
-smallbox = "0.8.1"
+segmap = "0.1.0"

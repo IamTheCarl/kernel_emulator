@@ -1,5 +1,6 @@
-use elf_rs::{Elf, ElfFile, ProgramHeaderFlags};
-use std::{collections::BTreeMap, sync::Arc};
+use elf_rs::{Elf, ElfFile, SectionHeaderFlags};
+use segmap::SegmentMap;
+use std::sync::Arc;
 use syscalls::Sysno;
 use thiserror::Error;
 
@@ -21,7 +22,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error("Memory Error: {0}")]
-    MemoryError(#[from] memory::Error),
+    Memory(#[from] memory::Error),
 
     #[error("The end of the exectuable block has been reached.")]
     EndOfExecutableBlock,
@@ -39,13 +40,13 @@ pub struct Executable {
 type Pointer = u64;
 
 pub struct Kernel {
-    memory: BTreeMap<Pointer, MemoryBlock>,
+    memory: SegmentMap<Pointer, MemoryBlock>,
 }
 
 impl Kernel {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            memory: BTreeMap::new(),
+            memory: SegmentMap::new(),
         })
     }
 
@@ -55,18 +56,34 @@ impl Kernel {
         let mut sections = Vec::new();
         let entry_point = elf.entry_point();
 
-        for header in elf.program_header_iter() {
+        for header in elf.section_header_iter() {
             let flags = header.flags();
 
             let base_data = Arc::new(header.content().to_vec());
 
-            sections.push(MemoryBlock::new(
-                header.paddr(),
-                Bytes::reference(base_data),
-                flags & ProgramHeaderFlags::READ == ProgramHeaderFlags::READ,
-                flags & ProgramHeaderFlags::WRITE == ProgramHeaderFlags::WRITE,
-                flags & ProgramHeaderFlags::EXECUTE == ProgramHeaderFlags::EXECUTE,
-            ));
+            let readable = flags & SectionHeaderFlags::SHF_ALLOC == SectionHeaderFlags::SHF_ALLOC;
+            let writable = flags & SectionHeaderFlags::SHF_WRITE == SectionHeaderFlags::SHF_WRITE;
+            let executable =
+                flags & SectionHeaderFlags::SHF_EXECINSTR == SectionHeaderFlags::SHF_EXECINSTR;
+
+            if (readable || writable || executable) && base_data.len() > 0 {
+                // println!(
+                //     "Load section:\t{:08x}-{:08x}\tR:{}\tW:{}\tX:{}",
+                //     header.addr(),
+                //     header.addr() + base_data.len() as Pointer - 1,
+                //     readable,
+                //     writable,
+                //     executable
+                // );
+
+                sections.push(MemoryBlock::new(
+                    header.addr(),
+                    Bytes::reference(base_data),
+                    readable,
+                    writable,
+                    executable,
+                ));
+            }
         }
 
         Ok(Arc::new(Executable {
@@ -87,7 +104,7 @@ impl Kernel {
         let instruction_pointer = executable.entry_point;
 
         let active_instruction_block = self
-            .get_memory_block(instruction_pointer)
+            .get_memory_block(&instruction_pointer)
             .ok_or(memory::Error::UnmappedAddress)?;
 
         if active_instruction_block.is_executable() {
@@ -118,7 +135,7 @@ impl Kernel {
                 }
             }
         } else {
-            Err(Error::MemoryError(memory::Error::WrongMemoryType {
+            Err(Error::Memory(memory::Error::WrongMemoryType {
                 address: active_instruction_block.base_address(),
                 read_wanted: false,
                 write_wanted: false,
@@ -149,7 +166,7 @@ impl Kernel {
                     };
 
                     let memory_block = self
-                        .get_memory_block(message_pointer)
+                        .get_memory_block(&message_pointer)
                         .ok_or(memory::Error::UnmappedAddress)?;
 
                     if memory_block.is_read() {
@@ -162,7 +179,7 @@ impl Kernel {
 
                         Ok(None)
                     } else {
-                        Err(Error::MemoryError(memory::Error::WrongMemoryType {
+                        Err(Error::Memory(memory::Error::WrongMemoryType {
                             address: message_pointer,
                             read_wanted: true,
                             write_wanted: false,
@@ -179,11 +196,11 @@ impl Kernel {
 }
 
 impl SystemMemory for Kernel {
-    fn memory_mut(&mut self) -> &mut BTreeMap<Pointer, MemoryBlock> {
+    fn memory_mut(&mut self) -> &mut SegmentMap<Pointer, MemoryBlock> {
         &mut self.memory
     }
 
-    fn memory(&self) -> &BTreeMap<Pointer, MemoryBlock> {
+    fn memory(&self) -> &SegmentMap<Pointer, MemoryBlock> {
         &self.memory
     }
 }
@@ -193,7 +210,7 @@ fn overlapping_memory() {
     fn assert_overlap_failed(result: memory::Result<()>) -> std::result::Result<(), &'static str> {
         match result {
             Err(error) => match error {
-                memory::Error::MemoryOverlapps => {
+                memory::Error::MemoryOverlapps { .. } => {
                     // We have successfully failed.
                     Ok(())
                 }

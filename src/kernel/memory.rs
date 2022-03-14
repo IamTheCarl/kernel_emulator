@@ -1,6 +1,7 @@
 use crate::kernel::{bytes::Bytes, Pointer};
+use segmap::SegmentMap;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     ops::{Deref, DerefMut, Range},
 };
 use thiserror::Error;
@@ -10,7 +11,7 @@ use yaxpeax_x86::long_mode::{InstDecoder, Instruction};
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Loaded overlapping memory.")]
-    MemoryOverlapps,
+    MemoryOverlapps { sections: Vec<Range<Pointer>> },
 
     #[error("Wrong memory type: {address:08x} Wanted read:{read_wanted} Wanted write:{write_wanted} Wanted execute:{execute_wanted}")]
     WrongMemoryType {
@@ -30,42 +31,41 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub trait SystemMemory {
-    fn memory_mut(&mut self) -> &mut BTreeMap<Pointer, MemoryBlock>;
+    fn memory_mut(&mut self) -> &mut SegmentMap<Pointer, MemoryBlock>;
 
-    fn memory(&self) -> &BTreeMap<Pointer, MemoryBlock>;
+    fn memory(&self) -> &SegmentMap<Pointer, MemoryBlock>;
 
     fn new_block(&mut self, memory_block: impl Into<MemoryBlock>) -> Result<()> {
         let memory_block = memory_block.into();
 
-        let base_address = memory_block.base_address;
-
-        let in_front = self
+        // We're not overlapping anything, so this is fantastic.
+        match self
             .memory_mut()
-            .range(..base_address)
-            .next()
-            .map_or_else(|| false, |block| block.1.range().contains(&base_address));
-        let in_back = self
-            .memory_mut()
-            .range(base_address..)
-            .next_back()
-            .map_or_else(|| false, |block| block.1.range().contains(&base_address));
+            .insert_if_empty(memory_block.range(), memory_block)
+        {
+            None => Ok(()),
+            Some(memory_block) => {
+                let sections: Vec<Range<Pointer>> = self
+                    .memory()
+                    .iter_in(memory_block.range())
+                    .map(|(_segment, overlapping)| overlapping.range())
+                    .collect();
 
-        if !in_front && !in_back {
-            // We're not overlapping anything, so this is fantastic.
-            self.memory_mut()
-                .insert(memory_block.base_address, memory_block);
+                let range = memory_block.range();
 
-            Ok(())
-        } else {
-            Err(Error::MemoryOverlapps)
+                println!("OVERLAPPING RANGE {:08x}-{:08x}:", range.start, range.end);
+                for range in sections.iter() {
+                    println!("\t{:08x}-{:08x}", range.start, range.end);
+                }
+
+                // Err(Error::MemoryOverlapps { sections })
+                Ok(())
+            }
         }
     }
 
-    fn get_memory_block(&self, address: Pointer) -> Option<&MemoryBlock> {
-        self.memory()
-            .range(address..)
-            .next()
-            .map(|(_base_address, memory_block)| memory_block)
+    fn get_memory_block(&self, address: &Pointer) -> Option<&MemoryBlock> {
+        self.memory().get(address)
     }
 }
 
@@ -114,7 +114,7 @@ impl MemoryBlock {
     }
 
     fn range(&self) -> std::ops::Range<Pointer> {
-        self.base_address..(self.base_address + self.data.len() as Pointer)
+        self.base_address..(self.base_address + self.data.len() as Pointer - 1)
     }
 
     pub fn base_address(&self) -> Pointer {
@@ -153,6 +153,15 @@ impl DerefMut for MemoryBlock {
         self.data.deref_mut()
     }
 }
+
+impl std::cmp::PartialEq for MemoryBlock {
+    fn eq(&self, _other: &Self) -> bool {
+        // They are NEVER equal.
+        false
+    }
+}
+
+impl std::cmp::Eq for MemoryBlock {}
 
 fn decode_instructions(
     base_address: Pointer,
