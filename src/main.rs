@@ -3,7 +3,8 @@ mod kernel;
 use kernel::*;
 
 fn main() {
-    let test_program = include_bytes!("../testing/hello_world.elf");
+    // let test_program = include_bytes!("../testing/hello_world_asm.elf");
+    let test_program = include_bytes!("../testing/hello_world_c.elf");
 
     let mut system = Kernel::new().unwrap();
 

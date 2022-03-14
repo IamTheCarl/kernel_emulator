@@ -1,12 +1,13 @@
 
 .PHONY:
-all: hello_world.elf
+all: hello_world_asm.elf hello_world_c.elf
 
-%.elf: %.o
-	ld -o $@ $<
+%.elf: %.c
+	gcc -o $@ $<
 
-%.o: %.s
-	nasm -f elf64 -o $@ $<
+hello_world_asm.elf: hello_world_asm.s
+	nasm -f elf64 -o hello_world_asm.o $<
+	ld -o $@ hello_world_asm.o
 
 .PHONY:
 clean:
