@@ -21,7 +21,7 @@ pub enum Error {
         execute_wanted: bool,
     },
 
-    #[error("Unmapped address.")]
+    #[error("Attempt to access unmapped memory.")]
     UnmappedAddress,
 
     #[error("Access memory is split between blocks.")]
@@ -30,23 +30,33 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub trait SystemMemory {
-    fn memory_mut(&mut self) -> &mut SegmentMap<Pointer, MemoryBlock>;
+pub struct SystemMemory {
+    segments: SegmentMap<Pointer, MemoryBlock>,
+}
 
-    fn memory(&self) -> &SegmentMap<Pointer, MemoryBlock>;
+impl SystemMemory {
+    pub fn new() -> Self {
+        Self {
+            segments: SegmentMap::new(),
+        }
+    }
 
-    fn new_block(&mut self, memory_block: impl Into<MemoryBlock>) -> Result<()> {
-        let memory_block = memory_block.into();
+    pub fn get_memory_block(&self, address: &Pointer) -> Result<&MemoryBlock> {
+        self.segments
+            .get(address)
+            .map_or(Err(Error::UnmappedAddress), Ok)
+    }
 
+    pub fn new_block(&mut self, memory_block: MemoryBlock) -> Result<()> {
         // We're not overlapping anything, so this is fantastic.
         match self
-            .memory_mut()
+            .segments
             .insert_if_empty(memory_block.range(), memory_block)
         {
             None => Ok(()),
             Some(memory_block) => {
                 let sections: Vec<Range<Pointer>> = self
-                    .memory()
+                    .segments
                     .iter_in(memory_block.range())
                     .map(|(_segment, overlapping)| overlapping.range())
                     .collect();
@@ -58,14 +68,9 @@ pub trait SystemMemory {
                     println!("\t{:08x}-{:08x}", range.start, range.end);
                 }
 
-                // Err(Error::MemoryOverlapps { sections })
-                Ok(())
+                Err(Error::MemoryOverlapps { sections })
             }
         }
-    }
-
-    fn get_memory_block(&self, address: &Pointer) -> Option<&MemoryBlock> {
-        self.memory().get(address)
     }
 }
 
@@ -130,11 +135,13 @@ impl MemoryBlock {
             .map(|first_instruction_index| self.instructions[*first_instruction_index..].iter())
     }
 
-    pub fn get_range(&self, range: Range<Pointer>) -> Option<&[u8]> {
+    pub fn get_range(&self, range: Range<Pointer>) -> Result<&[u8]> {
         let start = range.start - self.base_address;
         let end = range.end - self.base_address;
 
-        self.data.get(start as usize..end as usize)
+        self.data
+            .get(start as usize..end as usize)
+            .map_or(Err(Error::SectionAliacing), Ok)
     }
 
     // TODO when you add a way to mutably access memory, we need to re-build the executable section, if applicable.
@@ -186,4 +193,82 @@ fn decode_instructions(
     }
 
     (instruction_addresses, instructions)
+}
+
+#[test]
+fn overlapping_memory() {
+    fn assert_overlap_failed(result: Result<()>) -> std::result::Result<(), &'static str> {
+        match result {
+            Err(error) => match error {
+                Error::MemoryOverlapps { .. } => {
+                    // We have successfully failed.
+                    Ok(())
+                }
+                _ => Err("Overlapping produced wrong error type."),
+            },
+            Ok(_) => Err("Overlapping did not fail."),
+        }
+    }
+
+    let mut kernel = SystemMemory::new();
+    kernel
+        .new_block(MemoryBlock::new(
+            0,
+            Bytes::from_static(&[0u8; 512]),
+            false,
+            false,
+            false,
+        ))
+        .unwrap();
+
+    kernel
+        .new_block(MemoryBlock::new(
+            512,
+            Bytes::from_static(&[0u8; 512]),
+            false,
+            false,
+            false,
+        ))
+        .unwrap();
+
+    let result = kernel.new_block(MemoryBlock::new(
+        512,
+        Bytes::from_static(&[0u8; 512]),
+        false,
+        false,
+        false,
+    ));
+    assert_overlap_failed(result).unwrap();
+
+    let result = kernel.new_block(MemoryBlock::new(
+        256,
+        Bytes::from_static(&[0u8; 512]),
+        false,
+        false,
+        false,
+    ));
+    assert_overlap_failed(result).unwrap();
+
+    let result = kernel.new_block(MemoryBlock::new(
+        1,
+        Bytes::from_static(&[0u8; 1]),
+        false,
+        false,
+        false,
+    ));
+    assert_overlap_failed(result).unwrap();
+}
+
+#[test]
+fn load_instructions() {
+    let mut kernel = SystemMemory::new();
+    kernel
+        .new_block(MemoryBlock::new(
+            0,
+            Bytes::from_static(&[0x8b, 0x01, 0x00, 0x00, 0x00]),
+            false,
+            false,
+            true,
+        ))
+        .unwrap();
 }

@@ -11,10 +11,14 @@ pub enum Bytes {
 }
 
 impl Bytes {
+    // Used in unit tests.
+    #[allow(unused)]
     pub fn from_static(data: &'static [u8]) -> Self {
         Self::Static(data)
     }
 
+    // Used in unit tests.
+    #[allow(unused)]
     pub fn from_vec(data: Vec<u8>) -> Self {
         Self::Original(data)
     }

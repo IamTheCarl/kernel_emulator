@@ -1,3 +1,7 @@
+use crate::kernel::{
+    memory::{Error as MemoryError, SystemMemory},
+    Pointer,
+};
 use thiserror::Error;
 use yaxpeax_x86::{
     amd64::Opcode,
@@ -5,7 +9,12 @@ use yaxpeax_x86::{
 };
 
 #[derive(Error, Debug)]
-pub enum Error {}
+pub enum Error {
+    #[error("Memory Error: {0}")]
+    Memory(#[from] MemoryError),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 pub type RegisterFile = [u64; 16];
 #[repr(usize)]
@@ -29,7 +38,7 @@ pub enum Register {
     Rip = 16,
 }
 
-fn read_operand(registers: &RegisterFile, operand: Operand) -> u64 {
+fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: Operand) -> u64 {
     match operand {
         Operand::ImmediateI8(v) => v as u64,
         Operand::ImmediateU8(v) => v as u64,
@@ -40,11 +49,33 @@ fn read_operand(registers: &RegisterFile, operand: Operand) -> u64 {
         Operand::ImmediateI64(v) => v as u64,
         Operand::ImmediateU64(v) => v as u64,
         Operand::Register(spec) => registers[spec.num() as usize],
-        _ => unimplemented!(),
+        // Operand::RegisterMaskMerge(_, _, _) => todo!(),
+        // Operand::RegisterMaskMergeSae(_, _, _, _) => todo!(),
+        // Operand::RegisterMaskMergeSaeNoround(_, _, _) => todo!(),
+        // Operand::DisplacementU32(_) => todo!(),
+        // Operand::DisplacementU64(_) => todo!(),
+        // Operand::RegDeref(_) => todo!(),
+        // Operand::RegDisp(_, _) => todo!(),
+        // Operand::RegScale(_, _) => todo!(),
+        // Operand::RegIndexBase(_, _) => todo!(),
+        // Operand::RegIndexBaseDisp(_, _, _) => todo!(),
+        // Operand::RegScaleDisp(_, _, _) => todo!(),
+        // Operand::RegIndexBaseScale(_, _, _) => todo!(),
+        // Operand::RegIndexBaseScaleDisp(_, _, _, _) => todo!(),
+        // Operand::RegDerefMasked(_, _) => todo!(),
+        // Operand::RegDispMasked(_, _, _) => todo!(),
+        // Operand::RegScaleMasked(_, _, _) => todo!(),
+        // Operand::RegIndexBaseMasked(_, _, _) => todo!(),
+        // Operand::RegIndexBaseDispMasked(_, _, _, _) => todo!(),
+        // Operand::RegScaleDispMasked(_, _, _, _) => todo!(),
+        // Operand::RegIndexBaseScaleMasked(_, _, _, _) => todo!(),
+        // Operand::RegIndexBaseScaleDispMasked(_, _, _, _, _) => todo!(),
+        Operand::Nothing => panic!("operand out of bounds."),
+        _ => unreachable!(),
     }
 }
 
-fn write_target(registers: &mut RegisterFile, operand: Operand, value: u64) {
+fn write_target(memory: &SystemMemory, registers: &mut RegisterFile, operand: Operand, value: u64) {
     match operand {
         Operand::Register(spec) => registers[spec.num() as usize] = value,
         _ => unimplemented!(),
@@ -52,13 +83,16 @@ fn write_target(registers: &mut RegisterFile, operand: Operand, value: u64) {
 }
 
 pub fn run_instruction<S, R>(
+    memory: &SystemMemory,
     registers: &mut RegisterFile,
     instruction: &Instruction,
     mut syscall_handler: S,
-) -> Option<R>
+) -> Result<Option<R>>
 where
     S: FnMut(&mut RegisterFile) -> R,
 {
+    println!("{}", instruction);
+
     match instruction.opcode() {
         Opcode::Invalid => unimplemented!(), // TODO this should fire a signal.
         // Opcode::ADD => todo!(),
@@ -66,7 +100,11 @@ where
         // Opcode::ADC => todo!(),
         // Opcode::SBB => todo!(),
         // Opcode::AND => todo!(),
-        // Opcode::XOR => todo!(),
+        Opcode::XOR => {
+            let a = read_operand(memory, registers, instruction.operand(0));
+            let b = read_operand(memory, registers, instruction.operand(1));
+            write_target(memory, registers, instruction.operand(0), a ^ b);
+        }
         // Opcode::SUB => todo!(),
         // Opcode::CMP => todo!(),
         // Opcode::XADD => todo!(),
@@ -134,9 +172,35 @@ where
         // Opcode::JMP => todo!(),
         // Opcode::JMPF => todo!(),
         // Opcode::PUSH => todo!(),
-        // Opcode::POP => todo!(),
+        Opcode::POP => {
+            let stack_pointer = registers[Register::Rsp as usize];
+            let block = memory.get_memory_block(&stack_pointer)?;
+
+            // We need to figure out the width of our instruction.
+            let mem_size = instruction
+                .mem_size()
+                .map(|size| {
+                    size.bytes_size()
+                        .expect("Could not get instruction operand width.")
+                })
+                .unwrap_or(8);
+
+            // Reading the value is more convoluted than you may expect.
+            let mem_size = instruction.operand(0).width().unwrap_or(mem_size);
+            let value_bytes = block.get_range(stack_pointer..stack_pointer + 8)?;
+            let mut value = [0u8; 8];
+            value.copy_from_slice(value_bytes);
+            let value = u64::from_le_bytes(value);
+            let shifted_bits = mem_size * 8;
+            let value = (value << shifted_bits) >> shifted_bits;
+
+            registers[Register::Rsp as usize] = stack_pointer + mem_size as Pointer;
+            write_target(memory, registers, instruction.operand(0), value);
+        }
         // Opcode::LEA => todo!(),
-        // Opcode::NOP => todo!(),
+        Opcode::NOP => {
+            // Easy.
+        }
         // Opcode::PREFETCHNTA => todo!(),
         // Opcode::PREFETCH0 => todo!(),
         // Opcode::PREFETCH1 => todo!(),
@@ -152,8 +216,8 @@ where
         // Opcode::ENTER => todo!(),
         // Opcode::LEAVE => todo!(),
         Opcode::MOV => {
-            let to_move = read_operand(&registers, instruction.operand(1));
-            write_target(registers, instruction.operand(0), to_move);
+            let to_move = read_operand(memory, registers, instruction.operand(1));
+            write_target(memory, registers, instruction.operand(0), to_move);
         }
         // Opcode::RETURN => todo!(),
         // Opcode::PUSHF => todo!(),
@@ -240,7 +304,7 @@ where
         // Opcode::SYSRET => todo!(),
         // Opcode::CLTS => todo!(),
         Opcode::SYSCALL => {
-            return Some(syscall_handler(registers));
+            return Ok(Some(syscall_handler(registers)));
         }
         // Opcode::LSL => todo!(),
         // Opcode::LAR => todo!(),
@@ -1105,7 +1169,11 @@ where
         // Opcode::SETSSBSY => todo!(),
         // Opcode::CLRSSBSY => todo!(),
         // Opcode::RSTORSSP => todo!(),
-        // Opcode::ENDBR64 => todo!(),
+        Opcode::ENDBR64 => {
+            // End of branch marker.
+            // It's a sort of landing pad for jump instructions, so that we can gracefully fail on an invalid jump.
+            // It's perfectly valid to implement it as a noop.
+        }
         // Opcode::ENDBR32 => todo!(),
         // Opcode::TDCALL => todo!(),
         // Opcode::SEAMRET => todo!(),
@@ -1484,5 +1552,5 @@ where
         }
     }
 
-    None
+    Ok(None)
 }

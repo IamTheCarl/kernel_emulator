@@ -1,5 +1,4 @@
 use elf_rs::{Elf, ElfFile, SectionHeaderFlags};
-use segmap::SegmentMap;
 use std::sync::Arc;
 use syscalls::Sysno;
 use thiserror::Error;
@@ -24,6 +23,9 @@ pub enum Error {
     #[error("Memory Error: {0}")]
     Memory(#[from] memory::Error),
 
+    #[error("CPU Error: {0}")]
+    Cpu(#[from] cpu::Error),
+
     #[error("The end of the exectuable block has been reached.")]
     EndOfExecutableBlock,
 }
@@ -40,13 +42,13 @@ pub struct Executable {
 type Pointer = u64;
 
 pub struct Kernel {
-    memory: SegmentMap<Pointer, MemoryBlock>,
+    memory: SystemMemory,
 }
 
 impl Kernel {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            memory: SegmentMap::new(),
+            memory: SystemMemory::new(),
         })
     }
 
@@ -92,20 +94,17 @@ impl Kernel {
         }))
     }
 
-    // TODO this function is HUGE! Move it to its own struct in another module.
     pub fn execute(&mut self, executable: &Executable) -> Result<u64> {
         // Start by loading the executable into memory.
         for section in executable.sections.iter() {
-            self.new_block(section.clone())?;
+            self.memory.new_block(section.clone())?;
         }
 
         let mut registers: RegisterFile = [0u64; 16];
 
         let instruction_pointer = executable.entry_point;
 
-        let active_instruction_block = self
-            .get_memory_block(&instruction_pointer)
-            .ok_or(memory::Error::UnmappedAddress)?;
+        let active_instruction_block = self.memory.get_memory_block(&instruction_pointer)?;
 
         if active_instruction_block.is_executable() {
             let mut next_indstruction = active_instruction_block
@@ -122,11 +121,12 @@ impl Kernel {
                     .next()
                     .ok_or(Error::EndOfExecutableBlock)?;
 
-                if let Some(syscall_result) =
-                    run_instruction(&mut registers, active_instruction, |registers| {
-                        self.syscall(registers)
-                    })
-                {
+                if let Some(syscall_result) = run_instruction(
+                    &self.memory,
+                    &mut registers,
+                    active_instruction,
+                    |registers| self.syscall(registers),
+                )? {
                     // We had a syscall and need to process the result.
                     if let Some(exit_code) = syscall_result? {
                         // Process terminated.
@@ -165,14 +165,11 @@ impl Kernel {
                         _ => panic!("Non standard file handals are not yet supported."),
                     };
 
-                    let memory_block = self
-                        .get_memory_block(&message_pointer)
-                        .ok_or(memory::Error::UnmappedAddress)?;
+                    let memory_block = self.memory.get_memory_block(&message_pointer)?;
 
                     if memory_block.is_read() {
                         let message = memory_block
-                            .get_range(message_pointer..message_pointer + message_length)
-                            .ok_or(memory::Error::SectionAliacing)?;
+                            .get_range(message_pointer..message_pointer + message_length)?;
 
                         let bytes_written = file.write(message)?;
                         registers[Register::Rax as usize] = bytes_written as u64;
@@ -193,92 +190,4 @@ impl Kernel {
             Err(Error::InvalidSyscall(call_code))
         }
     }
-}
-
-impl SystemMemory for Kernel {
-    fn memory_mut(&mut self) -> &mut SegmentMap<Pointer, MemoryBlock> {
-        &mut self.memory
-    }
-
-    fn memory(&self) -> &SegmentMap<Pointer, MemoryBlock> {
-        &self.memory
-    }
-}
-
-#[test]
-fn overlapping_memory() {
-    fn assert_overlap_failed(result: memory::Result<()>) -> std::result::Result<(), &'static str> {
-        match result {
-            Err(error) => match error {
-                memory::Error::MemoryOverlapps { .. } => {
-                    // We have successfully failed.
-                    Ok(())
-                }
-                _ => Err("Overlapping produced wrong error type."),
-            },
-            Ok(_) => Err("Overlapping did not fail."),
-        }
-    }
-
-    let mut kernel = Kernel::new().unwrap();
-    kernel
-        .new_block(MemoryBlock::new(
-            0,
-            Bytes::from_static(&[0u8; 512]),
-            false,
-            false,
-            false,
-        ))
-        .unwrap();
-
-    kernel
-        .new_block(MemoryBlock::new(
-            512,
-            Bytes::from_static(&[0u8; 512]),
-            false,
-            false,
-            false,
-        ))
-        .unwrap();
-
-    let result = kernel.new_block(MemoryBlock::new(
-        512,
-        Bytes::from_static(&[0u8; 512]),
-        false,
-        false,
-        false,
-    ));
-    assert_overlap_failed(result).unwrap();
-
-    let result = kernel.new_block(MemoryBlock::new(
-        256,
-        Bytes::from_static(&[0u8; 512]),
-        false,
-        false,
-        false,
-    ));
-    assert_overlap_failed(result).unwrap();
-
-    let result = kernel.new_block(MemoryBlock::new(
-        1,
-        Bytes::from_static(&[0u8; 1]),
-        false,
-        false,
-        false,
-    ));
-    assert_overlap_failed(result).unwrap();
-}
-
-#[test]
-fn load_instructions() {
-    let mut kernel = Kernel::new().unwrap();
-    kernel
-        .new_block(MemoryBlock::new(
-            0,
-            Bytes::from_static(&[0x8b, 0x01, 0x00, 0x00, 0x00]),
-            false,
-            false,
-            true,
-        ))
-        .unwrap();
 }
