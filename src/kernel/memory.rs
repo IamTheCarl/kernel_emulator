@@ -72,6 +72,12 @@ impl SystemMemory {
             }
         }
     }
+
+    pub fn end_address(&self) -> Pointer {
+        self.segments.bounds().map_or(0, |bounds| {
+            bounds.end_value().copied().copied().unwrap_or(0)
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -118,7 +124,7 @@ impl MemoryBlock {
         self.write
     }
 
-    fn range(&self) -> std::ops::Range<Pointer> {
+    pub fn range(&self) -> std::ops::Range<Pointer> {
         self.base_address..(self.base_address + self.data.len() as Pointer - 1)
     }
 

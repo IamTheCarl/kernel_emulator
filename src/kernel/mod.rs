@@ -1,5 +1,5 @@
 use elf_rs::{Elf, ElfFile, SectionHeaderFlags};
-use std::sync::Arc;
+use std::{ffi::CString, sync::Arc};
 use syscalls::Sysno;
 use thiserror::Error;
 
@@ -28,6 +28,9 @@ pub enum Error {
 
     #[error("The end of the exectuable block has been reached.")]
     EndOfExecutableBlock,
+
+    #[error("CString has invalid format: {0}")]
+    StringFormat(#[from] std::ffi::NulError),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -39,7 +42,9 @@ pub struct Executable {
     sections: Vec<MemoryBlock>,
 }
 
-type Pointer = u64;
+pub type Pointer = u64;
+pub const POINTER_WIDTH: Pointer = std::mem::size_of::<Pointer>() as Pointer;
+pub const STACK_SIZE: Pointer = 4 * 1024; // 4 Kb
 
 pub struct Kernel {
     memory: SystemMemory,
@@ -94,13 +99,70 @@ impl Kernel {
         }))
     }
 
-    pub fn execute(&mut self, executable: &Executable) -> Result<u64> {
+    pub fn execute(
+        &mut self,
+        executable: &Executable,
+        arguments: impl Into<Vec<String>>,
+    ) -> Result<u64> {
+        let arguments = arguments.into();
+
+        // The register file. We need to set this up.
+        let mut registers: RegisterFile = [0u64; 16];
+
         // Start by loading the executable into memory.
         for section in executable.sections.iter() {
             self.memory.new_block(section.clone())?;
         }
 
-        let mut registers: RegisterFile = [0u64; 16];
+        // Build the stack.
+        // We intentionally build it backwards and then reverse it, because the direction of the x86 stack is backwards in comparison to vectors.
+        // 8byte aligned stack start address.
+        let stack_end = (self.memory.end_address() / POINTER_WIDTH + 1) * POINTER_WIDTH;
+        let mut data: Vec<u8> = Vec::new(); // Stack data.
+
+        // Push the command line arguments onto the stack.
+        let mut argument_pointers: Vec<Pointer> = Vec::new();
+        let argument_count = arguments.len() as Pointer;
+        for argument in arguments {
+            // The pointer to where the value will live on the stack.
+            argument_pointers.push(stack_end + data.len() as Pointer);
+
+            // Insert the string into the stack.
+            let argument = CString::new(argument)?;
+            let argument = argument.as_bytes_with_nul();
+            data.extend(argument.iter().rev());
+        }
+
+        // TODO we need to push on environment variables.
+        data.extend([0u8; POINTER_WIDTH as usize].iter()); // The last argument pointer must be a null.
+
+        // TODO add Auxilary vector.
+        data.extend([0u8; POINTER_WIDTH as usize * 2].iter()); // The last auxilary variable must be null,null.
+
+        // TODO add Environment vector.
+        data.extend([0u8; POINTER_WIDTH as usize].iter()); // The last environment variable pointer must be null.
+
+        // Create an array of pointers to the command line arguments.
+        for pointer in argument_pointers {
+            let pointer = pointer.to_be_bytes();
+            data.extend(pointer.iter());
+        }
+        data.extend([0u8; POINTER_WIDTH as usize].iter()); // The last argument pointer must be a null.
+
+        // Push the argument count.
+        data.extend(argument_count.to_le_bytes().iter());
+
+        // Set stack pointer to top of stack.
+        registers[Register::Rsp as usize] = stack_end + data.len() as Pointer;
+
+        // Finally, reverse and resize the stack array.
+        data.reverse();
+        data.resize(STACK_SIZE as usize, 0);
+
+        // Create the stack's memory block.
+        let stack = MemoryBlock::new(stack_end, Bytes::Original(data), true, true, false);
+
+        self.memory.new_block(stack)?;
 
         let instruction_pointer = executable.entry_point;
 

@@ -174,6 +174,7 @@ where
         // Opcode::PUSH => todo!(),
         Opcode::POP => {
             let stack_pointer = registers[Register::Rsp as usize];
+
             let block = memory.get_memory_block(&stack_pointer)?;
 
             // We need to figure out the width of our instruction.
@@ -187,12 +188,11 @@ where
 
             // Reading the value is more convoluted than you may expect.
             let mem_size = instruction.operand(0).width().unwrap_or(mem_size);
-            let value_bytes = block.get_range(stack_pointer..stack_pointer + 8)?;
+            let value_bytes =
+                block.get_range(stack_pointer..stack_pointer + mem_size as Pointer)?;
             let mut value = [0u8; 8];
             value.copy_from_slice(value_bytes);
-            let value = u64::from_le_bytes(value);
-            let shifted_bits = mem_size * 8;
-            let value = (value << shifted_bits) >> shifted_bits;
+            let value = Pointer::from_le_bytes(value);
 
             registers[Register::Rsp as usize] = stack_pointer + mem_size as Pointer;
             write_target(memory, registers, instruction.operand(0), value);

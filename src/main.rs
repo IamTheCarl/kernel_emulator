@@ -9,7 +9,9 @@ fn main() {
     let mut system = Kernel::new().unwrap();
 
     let executable = Kernel::load_elf(test_program).unwrap();
-    let exit_code = system.execute(&executable).unwrap();
+    let exit_code = system
+        .execute(&executable, ["application_path".to_string()])
+        .unwrap();
 
     println!("Exit code: {}", exit_code)
 }
