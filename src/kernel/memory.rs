@@ -1,6 +1,7 @@
 use crate::kernel::{bytes::Bytes, Pointer};
 use segmap::SegmentMap;
 use std::{
+    cell::{Ref, RefCell, RefMut},
     collections::HashMap,
     ops::{Deref, DerefMut, Range},
 };
@@ -31,7 +32,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct SystemMemory {
-    segments: SegmentMap<Pointer, MemoryBlock>,
+    segments: SegmentMap<Pointer, RefCell<MemoryBlock>>,
 }
 
 impl SystemMemory {
@@ -41,27 +42,33 @@ impl SystemMemory {
         }
     }
 
-    pub fn get_memory_block(&self, address: &Pointer) -> Result<&MemoryBlock> {
+    pub fn get_memory_block(&self, address: &Pointer) -> Result<Ref<MemoryBlock>> {
         self.segments
             .get(address)
-            .map_or(Err(Error::UnmappedAddress), Ok)
+            .map_or(Err(Error::UnmappedAddress), |cell| Ok(cell.borrow()))
+    }
+
+    pub fn get_memory_block_mut(&self, address: &Pointer) -> Result<RefMut<MemoryBlock>> {
+        self.segments
+            .get(address)
+            .map_or(Err(Error::UnmappedAddress), |cell| Ok(cell.borrow_mut()))
     }
 
     pub fn new_block(&mut self, memory_block: MemoryBlock) -> Result<()> {
         // We're not overlapping anything, so this is fantastic.
         match self
             .segments
-            .insert_if_empty(memory_block.range(), memory_block)
+            .insert_if_empty(memory_block.range(), RefCell::new(memory_block))
         {
             None => Ok(()),
             Some(memory_block) => {
                 let sections: Vec<Range<Pointer>> = self
                     .segments
-                    .iter_in(memory_block.range())
-                    .map(|(_segment, overlapping)| overlapping.range())
+                    .iter_in(memory_block.borrow().range())
+                    .map(|(_segment, overlapping)| overlapping.borrow().range())
                     .collect();
 
-                let range = memory_block.range();
+                let range = memory_block.borrow().range();
 
                 println!("OVERLAPPING RANGE {:08x}-{:08x}:", range.start, range.end);
                 for range in sections.iter() {
@@ -150,7 +157,16 @@ impl MemoryBlock {
             .map_or(Err(Error::SectionAliacing), Ok)
     }
 
-    // TODO when you add a way to mutably access memory, we need to re-build the executable section, if applicable.
+    pub fn get_range_mut(&mut self, range: Range<Pointer>) -> Result<&mut [u8]> {
+        let start = range.start - self.base_address;
+        let end = range.end - self.base_address;
+
+        // FIXME we need to rebuild the executable code after the slice is released.
+
+        self.data
+            .get_mut(start as usize..end as usize)
+            .map_or(Err(Error::SectionAliacing), Ok)
+    }
 }
 
 impl Deref for MemoryBlock {

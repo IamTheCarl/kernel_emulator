@@ -99,7 +99,11 @@ where
         // Opcode::OR => todo!(),
         // Opcode::ADC => todo!(),
         // Opcode::SBB => todo!(),
-        // Opcode::AND => todo!(),
+        Opcode::AND => {
+            let a = read_operand(memory, registers, instruction.operand(0));
+            let b = read_operand(memory, registers, instruction.operand(1));
+            write_target(memory, registers, instruction.operand(0), a & b);
+        }
         Opcode::XOR => {
             let a = read_operand(memory, registers, instruction.operand(0));
             let b = read_operand(memory, registers, instruction.operand(1));
@@ -171,7 +175,27 @@ where
         // Opcode::CALLF => todo!(),
         // Opcode::JMP => todo!(),
         // Opcode::JMPF => todo!(),
-        // Opcode::PUSH => todo!(),
+        Opcode::PUSH => {
+            let stack_pointer = registers[Register::Rsp as usize];
+
+            // We need to figure out the width of our instruction.
+            let mem_size = instruction
+                .mem_size()
+                .map(|size| {
+                    size.bytes_size()
+                        .expect("Could not get instruction operand width.")
+                })
+                .unwrap_or(8);
+
+            let value = read_operand(memory, registers, instruction.operand(0));
+
+            let mem_size = instruction.operand(0).width().unwrap_or(mem_size);
+
+            let mut block = memory.get_memory_block_mut(&stack_pointer)?;
+            let target_bytes =
+                block.get_range_mut(stack_pointer..stack_pointer + mem_size as Pointer)?;
+            target_bytes.copy_from_slice(&value.to_le_bytes());
+        }
         Opcode::POP => {
             let stack_pointer = registers[Register::Rsp as usize];
 
