@@ -1,4 +1,4 @@
-use elf_rs::{Elf, ElfFile, SectionHeaderFlags};
+use elf_rs::{Elf, ElfFile, SectionHeaderFlags, SectionType};
 use std::{ffi::CString, sync::Arc};
 use syscalls::Sysno;
 use thiserror::Error;
@@ -40,6 +40,7 @@ pub struct Executable {
     entry_point: Pointer,
 
     sections: Vec<MemoryBlock>,
+    blank_sections: Vec<BlankMemoryBlock>,
 }
 
 pub type Pointer = u64;
@@ -66,6 +67,7 @@ impl Kernel {
         let elf = Elf::from_bytes(elf_bytes).unwrap();
 
         let mut sections = Vec::new();
+        let mut blank_sections = Vec::new();
         let entry_point = elf.entry_point();
 
         for header in elf.section_header_iter() {
@@ -89,19 +91,30 @@ impl Kernel {
                     String::from_utf8_lossy(header.section_name())
                 );
 
-                sections.push(MemoryBlock::new(
-                    header.addr(),
-                    Bytes::reference(base_data),
-                    readable,
-                    writable,
-                    executable,
-                ));
+                if header.sh_type() != SectionType::SHT_NOBITS {
+                    sections.push(MemoryBlock::new(
+                        header.addr(),
+                        Bytes::reference(base_data),
+                        readable,
+                        writable,
+                        executable,
+                    ));
+                } else {
+                    blank_sections.push(BlankMemoryBlock::new(
+                        header.addr() as Pointer,
+                        base_data.len() as Pointer,
+                        readable,
+                        writable,
+                        executable,
+                    ))
+                }
             }
         }
 
         Ok(Arc::new(Executable {
             entry_point,
             sections,
+            blank_sections,
         }))
     }
 
@@ -118,6 +131,9 @@ impl Kernel {
         // Start by loading the executable into memory.
         for section in executable.sections.iter() {
             self.memory.new_block(section.clone())?;
+        }
+        for section in executable.blank_sections.iter() {
+            self.memory.new_blank_block(section.clone())?;
         }
 
         // Build the stack.
@@ -195,6 +211,8 @@ impl Kernel {
                     active_instruction_block = self.memory.get_memory_block(&new_address)?;
                     next_indstruction =
                         active_instruction_block.instruction_iterator(new_address)?;
+
+                    registers.rip = new_address;
                 }
             }
         }

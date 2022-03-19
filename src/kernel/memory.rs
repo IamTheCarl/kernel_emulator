@@ -6,7 +6,7 @@ use std::{
     ops::{Deref, DerefMut, Range},
 };
 use thiserror::Error;
-use yaxpeax_arch::{Decoder, Reader, U8Reader};
+use yaxpeax_arch::{Decoder, LengthedInstruction, Reader, U8Reader};
 use yaxpeax_x86::long_mode::{InstDecoder, Instruction};
 
 #[derive(Error, Debug)]
@@ -57,14 +57,54 @@ impl SystemMemory {
             .map_or(Err(Error::UnmappedAddress), |cell| Ok(cell.borrow_mut()))
     }
 
+    pub fn read_random(&self, address: Pointer, output: &mut [u8]) -> Result<()> {
+        let range = address..address + output.len() as Pointer;
+
+        let block = self.get_memory_block(&range.start)?;
+
+        if block.is_read() {
+            let data = block.get_range(range)?;
+            output.copy_from_slice(data);
+
+            Ok(())
+        } else {
+            Err(Error::WrongMemoryType {
+                address: range.start,
+                read_wanted: true,
+                write_wanted: false,
+                execute_wanted: false,
+            })
+        }
+    }
+
+    pub fn write_random(&self, address: Pointer, data: &[u8]) -> Result<()> {
+        let mut block = self.get_memory_block_mut(&address)?;
+
+        if block.is_write() {
+            let range = address..address + data.len() as Pointer;
+            let block_data = block.get_range_mut(range)?;
+
+            block_data.copy_from_slice(data);
+
+            Ok(())
+        } else {
+            Err(Error::WrongMemoryType {
+                address,
+                read_wanted: false,
+                write_wanted: true,
+                execute_wanted: false,
+            })
+        }
+    }
+
     pub fn new_block(&mut self, memory_block: MemoryBlock) -> Result<()> {
-        // We're not overlapping anything, so this is fantastic.
         match self
             .segments
             .insert_if_empty(memory_block.range(), RefCell::new(memory_block))
         {
-            None => Ok(()),
+            None => Ok(()), // We're not overlapping anything, so this is fantastic.
             Some(memory_block) => {
+                // We overlap. Produce some debug information and give an error.
                 let sections: Vec<Range<Pointer>> = self
                     .segments
                     .iter_in(memory_block.borrow().range())
@@ -81,6 +121,59 @@ impl SystemMemory {
                 Err(Error::MemoryOverlapps { sections })
             }
         }
+    }
+
+    pub fn new_blank_block(&mut self, block: BlankMemoryBlock) -> Result<()> {
+        // TODO implement.
+        eprintln!("Warning: Blank blocks are not yet implemented.");
+
+        // let range = block.range;
+
+        // // Can't modify the memory while iterating it, so we need to collect these into an owned vec.
+        // let gaps: Vec<Range<Pointer>> = self
+        //     .segments
+        //     .iter_gaps()
+        //     .map(|gap| Range {
+        //         start: **gap.start_value().expect("Infinite memory secton."),
+        //         end: **gap.start_value().expect("Infinite memory secton."),
+        //     })
+        //     .filter(|gap| {
+        //         range.contains(&gap.start)
+        //             || range.contains(&gap.end)
+        //             || gap.contains(&range.start)
+        //             || gap.contains(&range.end)
+        //     })
+        //     .collect();
+
+        // // We need to keep track of where the end is.
+        // let mut max = 0;
+        // for gap in gaps {
+        //     max = std::cmp::max(max, gap.end);
+
+        //     let length = gap.end - gap.start;
+
+        //     if length > 0 {
+        //         let data = Bytes::Original(vec![0u8; length as usize]);
+        //         let block =
+        //             MemoryBlock::new(gap.start, data, block.read, block.write, block.execute);
+
+        //         println!("BLANK BLOCK: {:08x}-{:08x}", gap.start, gap.end);
+        //         self.new_block(block)?;
+        //     }
+        // }
+
+        // // Finish the job by making sure there isn't a block of space open at the end.
+        // let end_length = range.end - max;
+        // if end_length > 0 {
+        //     let data = Bytes::Original(vec![0u8; end_length as usize]);
+        //     let block = MemoryBlock::new(max, data, block.read, block.write, block.execute);
+
+        //     println!("LAST BLANK BLOCK: {:08x}-{:08x}", max, max + end_length);
+
+        //     self.new_block(block)?;
+        // }
+
+        Ok(())
     }
 
     pub fn end_address(&self) -> Pointer {
@@ -201,6 +294,34 @@ impl std::cmp::PartialEq for MemoryBlock {
 
 impl std::cmp::Eq for MemoryBlock {}
 
+#[derive(Clone)]
+pub struct BlankMemoryBlock {
+    range: Range<Pointer>,
+    read: bool,
+    write: bool,
+    execute: bool,
+}
+
+impl BlankMemoryBlock {
+    pub fn new(
+        base_address: Pointer,
+        length: Pointer,
+        read: bool,
+        write: bool,
+        execute: bool,
+    ) -> Self {
+        Self {
+            range: Range {
+                start: base_address,
+                end: base_address + length,
+            },
+            read,
+            write,
+            execute,
+        }
+    }
+}
+
 fn decode_instructions(
     base_address: Pointer,
     bytes: &Bytes,
@@ -219,8 +340,7 @@ fn decode_instructions(
         instruction_addresses.insert(current_offset, instructions.len());
         instructions.push(instruction);
 
-        current_offset = base_address
-            + <U8Reader<'_> as Reader<u16, yaxpeax_arch::U32le>>::total_offset(&mut block) as u64;
+        current_offset += instruction.len();
     }
 
     (instruction_addresses, instructions)

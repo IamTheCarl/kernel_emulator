@@ -25,10 +25,15 @@ pub enum InstructionResult {
     Jump(Pointer),
 }
 
-// pub type RegisterFile = [u64; 17];
 pub struct RegisterFile {
     pub general_purpose_registers: [Pointer; 16],
     pub rip: Pointer,
+    pub sf: bool,
+    pub zf: bool,
+    pub pf: bool,
+    pub of: bool,
+    pub cf: bool,
+    pub af: bool,
 }
 
 impl RegisterFile {
@@ -36,6 +41,12 @@ impl RegisterFile {
         Self {
             general_purpose_registers: [0; 16],
             rip: 0,
+            sf: false,
+            zf: false,
+            pf: false,
+            of: false,
+            cf: false,
+            af: false,
         }
     }
 
@@ -120,16 +131,20 @@ pub enum GeneralPurposeRegister {
     R15 = 15,
 }
 
-fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: &Operand) -> u64 {
-    match *operand {
-        Operand::ImmediateI8(v) => v as u64,
-        Operand::ImmediateU8(v) => v as u64,
-        Operand::ImmediateI16(v) => v as u64,
-        Operand::ImmediateU16(v) => v as u64,
-        Operand::ImmediateI32(v) => v as u64,
-        Operand::ImmediateU32(v) => v as u64,
-        Operand::ImmediateI64(v) => v as u64,
-        Operand::ImmediateU64(v) => v as u64,
+fn read_operand(
+    memory: &SystemMemory,
+    registers: &RegisterFile,
+    operand: &Operand,
+) -> Result<Pointer> {
+    Ok(match *operand {
+        Operand::ImmediateI8(v) => v as Pointer,
+        Operand::ImmediateU8(v) => v as Pointer,
+        Operand::ImmediateI16(v) => v as Pointer,
+        Operand::ImmediateU16(v) => v as Pointer,
+        Operand::ImmediateI32(v) => v as Pointer,
+        Operand::ImmediateU32(v) => v as Pointer,
+        Operand::ImmediateI64(v) => v as Pointer,
+        Operand::ImmediateU64(v) => v as Pointer,
         Operand::Register(spec) => registers.get(spec),
         // Operand::RegisterMaskMerge(_, _, _) => todo!(),
         // Operand::RegisterMaskMergeSae(_, _, _, _) => todo!(),
@@ -137,7 +152,15 @@ fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: &Opera
         // Operand::DisplacementU32(_) => todo!(),
         // Operand::DisplacementU64(_) => todo!(),
         // Operand::RegDeref(_) => todo!(),
-        Operand::RegDisp(spec, displacement) => registers.get(spec) + displacement as u64,
+        Operand::RegDisp(spec, displacement) => {
+            let address = registers.get(spec).wrapping_add(displacement as Pointer);
+            let mut value = [0u8; 8];
+            let width = spec.width() as Pointer;
+
+            memory.read_random(address, &mut value[..width as usize])?;
+
+            Pointer::from_le_bytes(value)
+        }
         // Operand::RegScale(_, _) => todo!(),
         // Operand::RegIndexBase(_, _) => todo!(),
         // Operand::RegIndexBaseDisp(_, _, _) => todo!(),
@@ -154,10 +177,15 @@ fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: &Opera
         // Operand::RegIndexBaseScaleDispMasked(_, _, _, _, _) => todo!(),
         Operand::Nothing => panic!("operand out of bounds."),
         _ => unreachable!(),
-    }
+    })
 }
 
-fn write_target(memory: &SystemMemory, registers: &mut RegisterFile, operand: Operand, value: u64) {
+fn write_target(
+    memory: &SystemMemory,
+    registers: &mut RegisterFile,
+    operand: Operand,
+    value: Pointer,
+) -> Result<()> {
     match operand {
         Operand::Register(spec) => registers.set(spec, value),
         // Operand::ImmediateI8(_) => todo!(),
@@ -174,7 +202,13 @@ fn write_target(memory: &SystemMemory, registers: &mut RegisterFile, operand: Op
         // Operand::DisplacementU32(_) => todo!(),
         // Operand::DisplacementU64(_) => todo!(),
         // Operand::RegDeref(_) => todo!(),
-        // Operand::RegDisp(_, _) => todo!(),
+        Operand::RegDisp(spec, displacement) => {
+            let address = registers.get(spec).wrapping_add(displacement as Pointer);
+            let value = [0u8; 8];
+            let width = spec.width() as Pointer;
+
+            memory.write_random(address, &value[..width as usize])?;
+        }
         // Operand::RegScale(_, _) => todo!(),
         // Operand::RegIndexBase(_, _) => todo!(),
         // Operand::RegIndexBaseDisp(_, _, _) => todo!(),
@@ -190,8 +224,13 @@ fn write_target(memory: &SystemMemory, registers: &mut RegisterFile, operand: Op
         // Operand::RegIndexBaseScaleMasked(_, _, _, _) => todo!(),
         // Operand::RegIndexBaseScaleDispMasked(_, _, _, _, _) => todo!(),
         Operand::Nothing => panic!("operand out of bounds."),
-        _ => unreachable!(),
+        _ => {
+            dbg!(operand);
+            unreachable!()
+        }
     }
+
+    Ok(())
 }
 
 fn push_onto_stack(
@@ -200,10 +239,24 @@ fn push_onto_stack(
     value: &[u8],
 ) -> Result<()> {
     let stack_pointer = registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize];
-    let mut block = memory.get_memory_block_mut(&stack_pointer)?;
-    let target_bytes =
-        block.get_range_mut(stack_pointer..stack_pointer + value.len() as Pointer)?;
-    target_bytes.copy_from_slice(value);
+    memory.write_random(stack_pointer, value)?;
+
+    registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] -=
+        value.len() as Pointer;
+
+    Ok(())
+}
+
+fn pop_from_stack(
+    memory: &SystemMemory,
+    registers: &mut RegisterFile,
+    value: &mut [u8],
+) -> Result<()> {
+    let stack_pointer = registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize];
+    memory.read_random(stack_pointer, value)?;
+
+    registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] +=
+        value.len() as Pointer;
 
     Ok(())
 }
@@ -213,36 +266,50 @@ pub fn run_instruction(
     registers: &mut RegisterFile,
     instruction: &Instruction,
 ) -> Result<InstructionResult> {
-    println!("{:08x}: {}", registers.rip, instruction);
+    let instruction_length = instruction.len().to_const();
+    let next_instruction_address = registers.rip + instruction_length;
+
+    let mut instruction_bytes = [0u8; 15];
+
+    memory.read_random(
+        registers.rip,
+        &mut instruction_bytes[..instruction_length as usize],
+    )?;
+    println!(
+        "{:08x} {:<30}{}",
+        registers.rip,
+        format!("{:02x?}", &instruction_bytes[..instruction_length as usize]),
+        instruction
+    );
 
     match instruction.opcode() {
         Opcode::Invalid => unimplemented!(), // TODO this should fire a signal.
         Opcode::ADD => {
-            let a = read_operand(memory, registers, &instruction.operand(0));
-            let b = read_operand(memory, registers, &instruction.operand(1));
-            write_target(memory, registers, instruction.operand(0), a.wrapping_add(b));
+            let a = read_operand(memory, registers, &instruction.operand(0))?;
+            let b = read_operand(memory, registers, &instruction.operand(1))?;
+            write_target(memory, registers, instruction.operand(0), a.wrapping_add(b))?;
         }
         Opcode::OR => {
-            let a = read_operand(memory, registers, &instruction.operand(0));
-            let b = read_operand(memory, registers, &instruction.operand(1));
-            write_target(memory, registers, instruction.operand(0), a | b);
+            let a = read_operand(memory, registers, &instruction.operand(0))?;
+            let b = read_operand(memory, registers, &instruction.operand(1))?;
+            write_target(memory, registers, instruction.operand(0), a | b)?;
         }
         // Opcode::ADC => todo!(),
         // Opcode::SBB => todo!(),
         Opcode::AND => {
-            let a = read_operand(memory, registers, &instruction.operand(0));
-            let b = read_operand(memory, registers, &instruction.operand(1));
-            write_target(memory, registers, instruction.operand(0), a & b);
+            let a = read_operand(memory, registers, &instruction.operand(0))?;
+            let b = read_operand(memory, registers, &instruction.operand(1))?;
+            write_target(memory, registers, instruction.operand(0), a & b)?;
         }
         Opcode::XOR => {
-            let a = read_operand(memory, registers, &instruction.operand(0));
-            let b = read_operand(memory, registers, &instruction.operand(1));
-            write_target(memory, registers, instruction.operand(0), a ^ b);
+            let a = read_operand(memory, registers, &instruction.operand(0))?;
+            let b = read_operand(memory, registers, &instruction.operand(1))?;
+            write_target(memory, registers, instruction.operand(0), a ^ b)?;
         }
         Opcode::SUB => {
-            let a = read_operand(memory, registers, &instruction.operand(0));
-            let b = read_operand(memory, registers, &instruction.operand(1));
-            write_target(memory, registers, instruction.operand(0), a.wrapping_sub(b));
+            let a = read_operand(memory, registers, &instruction.operand(0))?;
+            let b = read_operand(memory, registers, &instruction.operand(1))?;
+            write_target(memory, registers, instruction.operand(0), a.wrapping_sub(b))?;
         }
         // Opcode::CMP => todo!(),
         // Opcode::XADD => todo!(),
@@ -308,14 +375,16 @@ pub fn run_instruction(
         Opcode::CALL => {
             // Get the return pointer and push that onto the stack.
             // We need that to return later.
-            let return_pointer = registers.rip + instruction.len();
+            let return_pointer = next_instruction_address;
             let return_pointer = return_pointer.to_le_bytes();
             push_onto_stack(memory, registers, &return_pointer)?;
 
             // Get the new address we're jumping to.
-            let new_address = read_operand(memory, registers, &instruction.operand(0));
-
-            println!("CALL: {:08x}", new_address);
+            let new_address = next_instruction_address.wrapping_add(read_operand(
+                memory,
+                registers,
+                &instruction.operand(0),
+            )?);
 
             return Ok(InstructionResult::Jump(new_address));
         }
@@ -324,20 +393,14 @@ pub fn run_instruction(
         // Opcode::JMPF => todo!(),
         Opcode::PUSH => {
             // We need to figure out the width of our instruction.
-
             let operand = instruction.operand(0);
             let mem_size = operand.width().expect("Could not get operand width.") as usize;
-            let value = read_operand(memory, registers, &operand);
+            let value = read_operand(memory, registers, &operand)?;
             let value = value.to_le_bytes();
 
             push_onto_stack(memory, registers, &value[..mem_size])?;
         }
         Opcode::POP => {
-            let stack_pointer =
-                registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize];
-
-            let block = memory.get_memory_block(&stack_pointer)?;
-
             // We need to figure out the width of our instruction.
             let mem_size = instruction
                 .mem_size()
@@ -349,18 +412,15 @@ pub fn run_instruction(
 
             // Reading the value is more convoluted than you may expect.
             let mem_size = instruction.operand(0).width().unwrap_or(mem_size);
-            let value_bytes =
-                block.get_range(stack_pointer..stack_pointer + mem_size as Pointer)?;
             let mut value = [0u8; 8];
-            value.copy_from_slice(value_bytes);
+
+            pop_from_stack(memory, registers, &mut value[..mem_size as usize])?;
             let value = Pointer::from_le_bytes(value);
 
-            registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] =
-                stack_pointer + mem_size as Pointer;
-            write_target(memory, registers, instruction.operand(0), value);
+            write_target(memory, registers, instruction.operand(0), value)?;
         }
         Opcode::LEA => {
-            let load_address = read_operand(memory, registers, &instruction.operand(1));
+            let load_address = read_operand(memory, registers, &instruction.operand(1))?;
             let mem_size = instruction
                 .mem_size()
                 .expect("LEA instruction did not access memory.")
@@ -390,7 +450,7 @@ pub fn run_instruction(
                 _ => panic!("LEA invalid memory access size."),
             };
 
-            write_target(memory, registers, instruction.operand(0), value);
+            write_target(memory, registers, instruction.operand(0), value)?;
         }
         Opcode::NOP => {
             // Easy.
@@ -410,8 +470,8 @@ pub fn run_instruction(
         // Opcode::ENTER => todo!(),
         // Opcode::LEAVE => todo!(),
         Opcode::MOV => {
-            let to_move = read_operand(memory, registers, &instruction.operand(1));
-            write_target(memory, registers, instruction.operand(0), to_move);
+            let to_move = read_operand(memory, registers, &instruction.operand(1))?;
+            write_target(memory, registers, instruction.operand(0), to_move)?;
         }
         // Opcode::RETURN => todo!(),
         // Opcode::PUSHF => todo!(),
@@ -429,7 +489,16 @@ pub fn run_instruction(
         // Opcode::CMPS => todo!(),
         // Opcode::SCAS => todo!(),
         // Opcode::MOVS => todo!(),
-        // Opcode::TEST => todo!(),
+        Opcode::TEST => {
+            let a = read_operand(memory, registers, &instruction.operand(0))?;
+            let b = read_operand(memory, registers, &instruction.operand(0))?;
+
+            let result = a & b;
+
+            registers.zf = result == 0;
+            registers.sf = (result as i64) < 0;
+            registers.pf = result.count_ones() & 1 == 1;
+        }
         // Opcode::INS => todo!(),
         // Opcode::IN => todo!(),
         // Opcode::OUTS => todo!(),
@@ -439,7 +508,18 @@ pub fn run_instruction(
         // Opcode::JNO => todo!(),
         // Opcode::JB => todo!(),
         // Opcode::JNB => todo!(),
-        // Opcode::JZ => todo!(),
+        Opcode::JZ => {
+            if registers.zf {
+                // Zero flag is set. We jump!
+                let address = next_instruction_address.wrapping_add(read_operand(
+                    memory,
+                    registers,
+                    &instruction.operand(0),
+                )?);
+
+                return Ok(InstructionResult::Jump(address));
+            }
+        }
         // Opcode::JNZ => todo!(),
         // Opcode::JA => todo!(),
         // Opcode::JNA => todo!(),
@@ -1747,7 +1827,7 @@ pub fn run_instruction(
     }
 
     // Update instruction pointer.
-    registers.rip += instruction.len();
+    registers.rip = next_instruction_address;
 
     Ok(InstructionResult::Continue)
 }
