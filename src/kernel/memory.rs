@@ -27,6 +27,9 @@ pub enum Error {
 
     #[error("Access memory is split between blocks.")]
     SectionAliacing,
+
+    #[error("Jump to address that aliaces an instruction.")]
+    InvalidInstructionAddress,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -135,17 +138,23 @@ impl MemoryBlock {
         self.base_address..(self.base_address + self.data.len() as Pointer - 1)
     }
 
-    pub fn base_address(&self) -> Pointer {
-        self.base_address
-    }
+    pub fn instruction_iterator(&self, address: Pointer) -> Result<InstructionIterator> {
+        if self.is_executable() {
+            let instruction_index = self.instruction_addresses.get(&address).cloned();
 
-    pub fn instruction_iterator(
-        &self,
-        address: Pointer,
-    ) -> Option<impl Iterator<Item = &Instruction>> {
-        self.instruction_addresses
-            .get(&address)
-            .map(|first_instruction_index| self.instructions[*first_instruction_index..].iter())
+            if let Some(instruction_index) = instruction_index {
+                Ok(InstructionIterator { instruction_index })
+            } else {
+                Err(Error::InvalidInstructionAddress)
+            }
+        } else {
+            Err(Error::WrongMemoryType {
+                address,
+                read_wanted: false,
+                write_wanted: false,
+                execute_wanted: true,
+            })
+        }
     }
 
     pub fn get_range(&self, range: Range<Pointer>) -> Result<&[u8]> {
@@ -215,6 +224,19 @@ fn decode_instructions(
     }
 
     (instruction_addresses, instructions)
+}
+
+pub struct InstructionIterator {
+    instruction_index: usize,
+}
+
+impl InstructionIterator {
+    pub fn next<'a>(&mut self, block: &'a MemoryBlock) -> Option<&'a Instruction> {
+        let old_index = self.instruction_index;
+        self.instruction_index += 1;
+
+        block.instructions.get(old_index)
+    }
 }
 
 #[test]

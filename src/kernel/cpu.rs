@@ -3,9 +3,11 @@ use crate::kernel::{
     Pointer,
 };
 use thiserror::Error;
+use yaxpeax_arch::LengthedInstruction;
+pub use yaxpeax_x86::long_mode::Instruction;
 use yaxpeax_x86::{
-    amd64::Opcode,
-    long_mode::{Instruction, Operand},
+    amd64::{Opcode, RegSpec},
+    long_mode::{register_class, Operand},
 };
 
 #[derive(Error, Debug)]
@@ -16,9 +18,90 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub type RegisterFile = [u64; 16];
+pub enum InstructionResult {
+    Continue,
+    Halt,
+    Syscall,
+    Jump(Pointer),
+}
+
+// pub type RegisterFile = [u64; 17];
+pub struct RegisterFile {
+    pub general_purpose_registers: [Pointer; 16],
+    pub rip: Pointer,
+}
+
+impl RegisterFile {
+    pub fn new() -> Self {
+        Self {
+            general_purpose_registers: [0; 16],
+            rip: 0,
+        }
+    }
+
+    pub fn get(&self, register: RegSpec) -> u64 {
+        match register.class() {
+            register_class::Q => self.general_purpose_registers[register.num() as usize],
+            register_class::D => {
+                self.general_purpose_registers[register.num() as usize] & 0xFFFF_FFFF
+            }
+            register_class::W => self.general_purpose_registers[register.num() as usize] & 0xFFFF,
+            register_class::B => self.general_purpose_registers[register.num() as usize] & 0xFF,
+            register_class::RB => unimplemented!(),
+            register_class::CR => unimplemented!(),
+            register_class::DR => unimplemented!(),
+            register_class::S => unimplemented!(),
+            register_class::X => unimplemented!(),
+            register_class::Y => unimplemented!(),
+            register_class::Z => unimplemented!(),
+            register_class::ST => unimplemented!(),
+            register_class::MM => unimplemented!(),
+            register_class::K => unimplemented!(),
+            register_class::RIP => self.rip,
+            register_class::EIP => self.rip & 0xFFFF_FFFF,
+            register_class::RFLAGS => unimplemented!(),
+            register_class::EFLAGS => unimplemented!(),
+        }
+    }
+
+    pub fn set<T>(&mut self, register: RegSpec, value: T)
+    where
+        T: Into<u64>,
+    {
+        let value = value.into();
+
+        match register.class() {
+            register_class::Q => self.general_purpose_registers[register.num() as usize] = value,
+            register_class::D => {
+                self.general_purpose_registers[register.num() as usize] = value & 0xFFFF_FFFF
+            }
+            register_class::W => {
+                self.general_purpose_registers[register.num() as usize] = value & 0xFFFF
+            }
+            register_class::B => {
+                self.general_purpose_registers[register.num() as usize] = value & 0xFF
+            }
+            register_class::RB => unimplemented!(),
+            register_class::CR => unimplemented!(),
+            register_class::DR => unimplemented!(),
+            register_class::S => unimplemented!(),
+            register_class::X => unimplemented!(),
+            register_class::Y => unimplemented!(),
+            register_class::Z => unimplemented!(),
+            register_class::ST => unimplemented!(),
+            register_class::MM => unimplemented!(),
+            register_class::K => unimplemented!(),
+            register_class::RIP => self.rip = value,
+            register_class::EIP => self.rip = value & 0xFFFF_FFFF,
+            register_class::RFLAGS => unimplemented!(),
+            register_class::EFLAGS => unimplemented!(),
+        }
+    }
+}
+
+#[allow(unused)]
 #[repr(usize)]
-pub enum Register {
+pub enum GeneralPurposeRegister {
     Rax = 0,
     Rcx = 1,
     Rdx = 2,
@@ -35,11 +118,10 @@ pub enum Register {
     R13 = 13,
     R14 = 14,
     R15 = 15,
-    Rip = 16,
 }
 
-fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: Operand) -> u64 {
-    match operand {
+fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: &Operand) -> u64 {
+    match *operand {
         Operand::ImmediateI8(v) => v as u64,
         Operand::ImmediateU8(v) => v as u64,
         Operand::ImmediateI16(v) => v as u64,
@@ -48,7 +130,44 @@ fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: Operan
         Operand::ImmediateU32(v) => v as u64,
         Operand::ImmediateI64(v) => v as u64,
         Operand::ImmediateU64(v) => v as u64,
-        Operand::Register(spec) => registers[spec.num() as usize],
+        Operand::Register(spec) => registers.get(spec),
+        // Operand::RegisterMaskMerge(_, _, _) => todo!(),
+        // Operand::RegisterMaskMergeSae(_, _, _, _) => todo!(),
+        // Operand::RegisterMaskMergeSaeNoround(_, _, _) => todo!(),
+        // Operand::DisplacementU32(_) => todo!(),
+        // Operand::DisplacementU64(_) => todo!(),
+        // Operand::RegDeref(_) => todo!(),
+        Operand::RegDisp(spec, displacement) => registers.get(spec) + displacement as u64,
+        // Operand::RegScale(_, _) => todo!(),
+        // Operand::RegIndexBase(_, _) => todo!(),
+        // Operand::RegIndexBaseDisp(_, _, _) => todo!(),
+        // Operand::RegScaleDisp(_, _, _) => todo!(),
+        // Operand::RegIndexBaseScale(_, _, _) => todo!(),
+        // Operand::RegIndexBaseScaleDisp(_, _, _, _) => todo!(),
+        // Operand::RegDerefMasked(_, _) => todo!(),
+        // Operand::RegDispMasked(_, _, _) => todo!(),
+        // Operand::RegScaleMasked(_, _, _) => todo!(),
+        // Operand::RegIndexBaseMasked(_, _, _) => todo!(),
+        // Operand::RegIndexBaseDispMasked(_, _, _, _) => todo!(),
+        // Operand::RegScaleDispMasked(_, _, _, _) => todo!(),
+        // Operand::RegIndexBaseScaleMasked(_, _, _, _) => todo!(),
+        // Operand::RegIndexBaseScaleDispMasked(_, _, _, _, _) => todo!(),
+        Operand::Nothing => panic!("operand out of bounds."),
+        _ => unreachable!(),
+    }
+}
+
+fn write_target(memory: &SystemMemory, registers: &mut RegisterFile, operand: Operand, value: u64) {
+    match operand {
+        Operand::Register(spec) => registers.set(spec, value),
+        // Operand::ImmediateI8(_) => todo!(),
+        // Operand::ImmediateU8(_) => todo!(),
+        // Operand::ImmediateI16(_) => todo!(),
+        // Operand::ImmediateU16(_) => todo!(),
+        // Operand::ImmediateI32(_) => todo!(),
+        // Operand::ImmediateU32(_) => todo!(),
+        // Operand::ImmediateI64(_) => todo!(),
+        // Operand::ImmediateU64(_) => todo!(),
         // Operand::RegisterMaskMerge(_, _, _) => todo!(),
         // Operand::RegisterMaskMergeSae(_, _, _, _) => todo!(),
         // Operand::RegisterMaskMergeSaeNoround(_, _, _) => todo!(),
@@ -75,41 +194,56 @@ fn read_operand(memory: &SystemMemory, registers: &RegisterFile, operand: Operan
     }
 }
 
-fn write_target(memory: &SystemMemory, registers: &mut RegisterFile, operand: Operand, value: u64) {
-    match operand {
-        Operand::Register(spec) => registers[spec.num() as usize] = value,
-        _ => unimplemented!(),
-    }
+fn push_onto_stack(
+    memory: &SystemMemory,
+    registers: &mut RegisterFile,
+    value: &[u8],
+) -> Result<()> {
+    let stack_pointer = registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize];
+    let mut block = memory.get_memory_block_mut(&stack_pointer)?;
+    let target_bytes =
+        block.get_range_mut(stack_pointer..stack_pointer + value.len() as Pointer)?;
+    target_bytes.copy_from_slice(value);
+
+    Ok(())
 }
 
-pub fn run_instruction<S, R>(
+pub fn run_instruction(
     memory: &SystemMemory,
     registers: &mut RegisterFile,
     instruction: &Instruction,
-    mut syscall_handler: S,
-) -> Result<Option<R>>
-where
-    S: FnMut(&mut RegisterFile) -> R,
-{
-    println!("{}", instruction);
+) -> Result<InstructionResult> {
+    println!("{:08x}: {}", registers.rip, instruction);
 
     match instruction.opcode() {
         Opcode::Invalid => unimplemented!(), // TODO this should fire a signal.
-        // Opcode::ADD => todo!(),
-        // Opcode::OR => todo!(),
+        Opcode::ADD => {
+            let a = read_operand(memory, registers, &instruction.operand(0));
+            let b = read_operand(memory, registers, &instruction.operand(1));
+            write_target(memory, registers, instruction.operand(0), a.wrapping_add(b));
+        }
+        Opcode::OR => {
+            let a = read_operand(memory, registers, &instruction.operand(0));
+            let b = read_operand(memory, registers, &instruction.operand(1));
+            write_target(memory, registers, instruction.operand(0), a | b);
+        }
         // Opcode::ADC => todo!(),
         // Opcode::SBB => todo!(),
         Opcode::AND => {
-            let a = read_operand(memory, registers, instruction.operand(0));
-            let b = read_operand(memory, registers, instruction.operand(1));
+            let a = read_operand(memory, registers, &instruction.operand(0));
+            let b = read_operand(memory, registers, &instruction.operand(1));
             write_target(memory, registers, instruction.operand(0), a & b);
         }
         Opcode::XOR => {
-            let a = read_operand(memory, registers, instruction.operand(0));
-            let b = read_operand(memory, registers, instruction.operand(1));
+            let a = read_operand(memory, registers, &instruction.operand(0));
+            let b = read_operand(memory, registers, &instruction.operand(1));
             write_target(memory, registers, instruction.operand(0), a ^ b);
         }
-        // Opcode::SUB => todo!(),
+        Opcode::SUB => {
+            let a = read_operand(memory, registers, &instruction.operand(0));
+            let b = read_operand(memory, registers, &instruction.operand(1));
+            write_target(memory, registers, instruction.operand(0), a.wrapping_sub(b));
+        }
         // Opcode::CMP => todo!(),
         // Opcode::XADD => todo!(),
         // Opcode::BT => todo!(),
@@ -170,34 +304,37 @@ where
         // Opcode::ROL => todo!(),
         // Opcode::INC => todo!(),
         // Opcode::DEC => todo!(),
-        // Opcode::HLT => todo!(),
-        // Opcode::CALL => todo!(),
+        Opcode::HLT => return Ok(InstructionResult::Halt),
+        Opcode::CALL => {
+            // Get the return pointer and push that onto the stack.
+            // We need that to return later.
+            let return_pointer = registers.rip + instruction.len();
+            let return_pointer = return_pointer.to_le_bytes();
+            push_onto_stack(memory, registers, &return_pointer)?;
+
+            // Get the new address we're jumping to.
+            let new_address = read_operand(memory, registers, &instruction.operand(0));
+
+            println!("CALL: {:08x}", new_address);
+
+            return Ok(InstructionResult::Jump(new_address));
+        }
         // Opcode::CALLF => todo!(),
         // Opcode::JMP => todo!(),
         // Opcode::JMPF => todo!(),
         Opcode::PUSH => {
-            let stack_pointer = registers[Register::Rsp as usize];
-
             // We need to figure out the width of our instruction.
-            let mem_size = instruction
-                .mem_size()
-                .map(|size| {
-                    size.bytes_size()
-                        .expect("Could not get instruction operand width.")
-                })
-                .unwrap_or(8);
 
-            let value = read_operand(memory, registers, instruction.operand(0));
+            let operand = instruction.operand(0);
+            let mem_size = operand.width().expect("Could not get operand width.") as usize;
+            let value = read_operand(memory, registers, &operand);
+            let value = value.to_le_bytes();
 
-            let mem_size = instruction.operand(0).width().unwrap_or(mem_size);
-
-            let mut block = memory.get_memory_block_mut(&stack_pointer)?;
-            let target_bytes =
-                block.get_range_mut(stack_pointer..stack_pointer + mem_size as Pointer)?;
-            target_bytes.copy_from_slice(&value.to_le_bytes());
+            push_onto_stack(memory, registers, &value[..mem_size])?;
         }
         Opcode::POP => {
-            let stack_pointer = registers[Register::Rsp as usize];
+            let stack_pointer =
+                registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize];
 
             let block = memory.get_memory_block(&stack_pointer)?;
 
@@ -218,10 +355,43 @@ where
             value.copy_from_slice(value_bytes);
             let value = Pointer::from_le_bytes(value);
 
-            registers[Register::Rsp as usize] = stack_pointer + mem_size as Pointer;
+            registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] =
+                stack_pointer + mem_size as Pointer;
             write_target(memory, registers, instruction.operand(0), value);
         }
-        // Opcode::LEA => todo!(),
+        Opcode::LEA => {
+            let load_address = read_operand(memory, registers, &instruction.operand(1));
+            let mem_size = instruction
+                .mem_size()
+                .expect("LEA instruction did not access memory.")
+                .bytes_size()
+                .expect("LEA memory access is not in bytes.");
+
+            let block = memory.get_memory_block(&load_address)?;
+            let value_bytes = block.get_range(load_address..load_address + mem_size as Pointer)?;
+
+            let value = match mem_size {
+                1 => value_bytes[0] as Pointer,
+                2 => {
+                    let mut value_bytes_known = [0u8; 2];
+                    value_bytes_known.copy_from_slice(value_bytes);
+                    u16::from_le_bytes(value_bytes_known) as Pointer
+                }
+                4 => {
+                    let mut value_bytes_known = [0u8; 4];
+                    value_bytes_known.copy_from_slice(value_bytes);
+                    u32::from_le_bytes(value_bytes_known) as Pointer
+                }
+                8 => {
+                    let mut value_bytes_known = [0u8; 8];
+                    value_bytes_known.copy_from_slice(value_bytes);
+                    u64::from_le_bytes(value_bytes_known) as Pointer
+                }
+                _ => panic!("LEA invalid memory access size."),
+            };
+
+            write_target(memory, registers, instruction.operand(0), value);
+        }
         Opcode::NOP => {
             // Easy.
         }
@@ -240,7 +410,7 @@ where
         // Opcode::ENTER => todo!(),
         // Opcode::LEAVE => todo!(),
         Opcode::MOV => {
-            let to_move = read_operand(memory, registers, instruction.operand(1));
+            let to_move = read_operand(memory, registers, &instruction.operand(1));
             write_target(memory, registers, instruction.operand(0), to_move);
         }
         // Opcode::RETURN => todo!(),
@@ -328,7 +498,7 @@ where
         // Opcode::SYSRET => todo!(),
         // Opcode::CLTS => todo!(),
         Opcode::SYSCALL => {
-            return Ok(Some(syscall_handler(registers)));
+            return Ok(InstructionResult::Syscall);
         }
         // Opcode::LSL => todo!(),
         // Opcode::LAR => todo!(),
@@ -1576,5 +1746,8 @@ where
         }
     }
 
-    Ok(None)
+    // Update instruction pointer.
+    registers.rip += instruction.len();
+
+    Ok(InstructionResult::Continue)
 }

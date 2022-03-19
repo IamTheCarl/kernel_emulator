@@ -46,6 +46,11 @@ pub type Pointer = u64;
 pub const POINTER_WIDTH: Pointer = std::mem::size_of::<Pointer>() as Pointer;
 pub const STACK_SIZE: Pointer = 4 * 1024; // 4 Kb
 
+pub enum ProgramResult {
+    Exit(u64),
+    Halt,
+}
+
 pub struct Kernel {
     memory: SystemMemory,
 }
@@ -74,14 +79,15 @@ impl Kernel {
                 flags & SectionHeaderFlags::SHF_EXECINSTR == SectionHeaderFlags::SHF_EXECINSTR;
 
             if (readable || writable || executable) && base_data.len() > 0 {
-                // println!(
-                //     "Load section:\t{:08x}-{:08x}\tR:{}\tW:{}\tX:{}",
-                //     header.addr(),
-                //     header.addr() + base_data.len() as Pointer - 1,
-                //     readable,
-                //     writable,
-                //     executable
-                // );
+                println!(
+                    "Load section:\t{:08x}-{:08x}\tR:{}\tW:{}\tX:{}\tName: {}",
+                    header.addr(),
+                    header.addr() + base_data.len() as Pointer - 1,
+                    readable,
+                    writable,
+                    executable,
+                    String::from_utf8_lossy(header.section_name())
+                );
 
                 sections.push(MemoryBlock::new(
                     header.addr(),
@@ -103,11 +109,11 @@ impl Kernel {
         &mut self,
         executable: &Executable,
         arguments: impl Into<Vec<String>>,
-    ) -> Result<u64> {
+    ) -> Result<ProgramResult> {
         let arguments = arguments.into();
 
         // The register file. We need to set this up.
-        let mut registers: RegisterFile = [0u64; 16];
+        let mut registers = RegisterFile::new();
 
         // Start by loading the executable into memory.
         for section in executable.sections.iter() {
@@ -153,7 +159,8 @@ impl Kernel {
         data.extend(argument_count.to_le_bytes().iter());
 
         // Set stack pointer to top of stack.
-        registers[Register::Rsp as usize] = stack_end + data.len() as Pointer;
+        registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] =
+            stack_end + data.len() as Pointer;
 
         // Finally, reverse and resize the stack array.
         data.reverse();
@@ -164,62 +171,53 @@ impl Kernel {
 
         self.memory.new_block(stack)?;
 
-        let instruction_pointer = executable.entry_point;
+        let entry_point = executable.entry_point;
+        registers.rip = entry_point;
 
-        let active_instruction_block = self.memory.get_memory_block(&instruction_pointer)?;
+        let mut active_instruction_block = self.memory.get_memory_block(&entry_point)?;
 
-        if active_instruction_block.is_executable() {
-            let mut next_indstruction = active_instruction_block
-                .instruction_iterator(instruction_pointer)
-                .ok_or(memory::Error::WrongMemoryType {
-                    address: instruction_pointer,
-                    execute_wanted: true,
-                    read_wanted: false,
-                    write_wanted: false,
-                })?;
+        let mut next_indstruction = active_instruction_block.instruction_iterator(entry_point)?;
 
-            loop {
-                let active_instruction = next_indstruction
-                    .next()
-                    .ok_or(Error::EndOfExecutableBlock)?;
+        loop {
+            let active_instruction = next_indstruction
+                .next(&active_instruction_block)
+                .ok_or(Error::EndOfExecutableBlock)?; // TODO see if there's an immediatly adjacent block where rip is pointing.
 
-                if let Some(syscall_result) = run_instruction(
-                    &self.memory,
-                    &mut registers,
-                    active_instruction,
-                    |registers| self.syscall(registers),
-                )? {
-                    // We had a syscall and need to process the result.
-                    if let Some(exit_code) = syscall_result? {
-                        // Process terminated.
-                        break Ok(exit_code);
+            match run_instruction(&self.memory, &mut registers, active_instruction)? {
+                InstructionResult::Continue => { /* Just go on your merry way! */ }
+                InstructionResult::Halt => break Ok(ProgramResult::Halt),
+                InstructionResult::Syscall => {
+                    if let Some(exit_code) = self.syscall(&mut registers)? {
+                        break Ok(ProgramResult::Exit(exit_code));
                     }
                 }
+                InstructionResult::Jump(new_address) => {
+                    active_instruction_block = self.memory.get_memory_block(&new_address)?;
+                    next_indstruction =
+                        active_instruction_block.instruction_iterator(new_address)?;
+                }
             }
-        } else {
-            Err(Error::Memory(memory::Error::WrongMemoryType {
-                address: active_instruction_block.base_address(),
-                read_wanted: false,
-                write_wanted: false,
-                execute_wanted: true,
-            }))
         }
     }
 
     fn syscall(&self, registers: &mut RegisterFile) -> Result<Option<u64>> {
-        let call_code = registers[Register::Rax as usize];
+        let call_code = registers.general_purpose_registers[GeneralPurposeRegister::Rax as usize];
 
         if let Some(call_code) = Sysno::new(call_code as usize) {
             match call_code {
                 Sysno::exit => {
-                    let exit_code = registers[Register::Rdi as usize];
+                    let exit_code =
+                        registers.general_purpose_registers[GeneralPurposeRegister::Rdi as usize];
 
                     Ok(Some(exit_code))
                 }
                 Sysno::write => {
-                    let file_handle = registers[Register::Rdi as usize];
-                    let message_pointer = registers[Register::Rsi as usize];
-                    let message_length = registers[Register::Rdx as usize];
+                    let file_handle =
+                        registers.general_purpose_registers[GeneralPurposeRegister::Rdi as usize];
+                    let message_pointer =
+                        registers.general_purpose_registers[GeneralPurposeRegister::Rsi as usize];
+                    let message_length =
+                        registers.general_purpose_registers[GeneralPurposeRegister::Rdx as usize];
 
                     let mut file: Box<dyn std::io::Write> = match file_handle {
                         1 => Box::new(std::io::stdout()),
@@ -234,7 +232,8 @@ impl Kernel {
                             .get_range(message_pointer..message_pointer + message_length)?;
 
                         let bytes_written = file.write(message)?;
-                        registers[Register::Rax as usize] = bytes_written as u64;
+                        registers.general_purpose_registers[GeneralPurposeRegister::Rax as usize] =
+                            bytes_written as u64;
 
                         Ok(None)
                     } else {
