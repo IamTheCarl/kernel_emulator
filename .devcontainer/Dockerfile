@@ -10,6 +10,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
         g++ \
         gcc-mingw-w64-x86-64 \
         libssl-dev \
-        nasm
+        nasm \
+        gdb
 
 WORKDIR /

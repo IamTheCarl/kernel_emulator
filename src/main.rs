@@ -9,12 +9,15 @@ fn main() {
     let mut system = Kernel::new().unwrap();
 
     let executable = Kernel::load_elf(test_program).unwrap();
-    let result = system
-        .execute(&executable, ["application_path".to_string()])
-        .unwrap();
+    let result = system.execute(&executable, ["application_path".to_string()]);
 
     match result {
-        ProgramResult::Exit(exit_code) => println!("Exit code: {}", exit_code),
-        ProgramResult::Halt => println!("Program Halt."),
+        Ok(result) => match result {
+            ProgramResult::Exit(exit_code) => println!("Exit code: {}", exit_code),
+            ProgramResult::Halt => println!("Program Halt."),
+        },
+        Err(error) => {
+            println!("Execution error: {}", error);
+        }
     }
 }

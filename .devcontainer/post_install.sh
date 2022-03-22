@@ -2,3 +2,5 @@
 
 rustup target install x86_64-unknown-linux-gnu
 rustup target install x86_64-pc-windows-gnu
+
+cargo install cargo-tarpaulin

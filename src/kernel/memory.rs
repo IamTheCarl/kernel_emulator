@@ -22,8 +22,8 @@ pub enum Error {
         execute_wanted: bool,
     },
 
-    #[error("Attempt to access unmapped memory.")]
-    UnmappedAddress,
+    #[error("Attempt to access unmapped memory: 0x{0:016x}.")]
+    UnmappedAddress(Pointer),
 
     #[error("Access memory is split between blocks.")]
     SectionAliacing,
@@ -48,13 +48,17 @@ impl SystemMemory {
     pub fn get_memory_block(&self, address: &Pointer) -> Result<Ref<MemoryBlock>> {
         self.segments
             .get(address)
-            .map_or(Err(Error::UnmappedAddress), |cell| Ok(cell.borrow()))
+            .map_or(Err(Error::UnmappedAddress(*address)), |cell| {
+                Ok(cell.borrow())
+            })
     }
 
     pub fn get_memory_block_mut(&self, address: &Pointer) -> Result<RefMut<MemoryBlock>> {
         self.segments
             .get(address)
-            .map_or(Err(Error::UnmappedAddress), |cell| Ok(cell.borrow_mut()))
+            .map_or(Err(Error::UnmappedAddress(*address)), |cell| {
+                Ok(cell.borrow_mut())
+            })
     }
 
     pub fn read_random(&self, address: Pointer, output: &mut [u8]) -> Result<()> {
@@ -65,6 +69,8 @@ impl SystemMemory {
         if block.is_read() {
             let data = block.get_range(range)?;
             output.copy_from_slice(data);
+
+            // println!("RANDOM READ: {:02x?}", data);
 
             Ok(())
         } else {
@@ -85,6 +91,8 @@ impl SystemMemory {
             let block_data = block.get_range_mut(range)?;
 
             block_data.copy_from_slice(data);
+
+            // println!("RANDOM WRITE: {:02x?}", block_data);
 
             Ok(())
         } else {
@@ -361,6 +369,7 @@ impl InstructionIterator {
 
 #[test]
 fn overlapping_memory() {
+    #[cfg(not(tarpaulin_include))]
     fn assert_overlap_failed(result: Result<()>) -> std::result::Result<(), &'static str> {
         match result {
             Err(error) => match error {

@@ -46,6 +46,7 @@ pub struct Executable {
 pub type Pointer = u64;
 pub const POINTER_WIDTH: Pointer = std::mem::size_of::<Pointer>() as Pointer;
 pub const STACK_SIZE: Pointer = 4 * 1024; // 4 Kb
+pub const STACK_START: Pointer = 0x7FFFFFFFFFFFFFFF;
 
 pub enum ProgramResult {
     Exit(u64),
@@ -81,15 +82,15 @@ impl Kernel {
                 flags & SectionHeaderFlags::SHF_EXECINSTR == SectionHeaderFlags::SHF_EXECINSTR;
 
             if (readable || writable || executable) && base_data.len() > 0 {
-                println!(
-                    "Load section:\t{:08x}-{:08x}\tR:{}\tW:{}\tX:{}\tName: {}",
-                    header.addr(),
-                    header.addr() + base_data.len() as Pointer - 1,
-                    readable,
-                    writable,
-                    executable,
-                    String::from_utf8_lossy(header.section_name())
-                );
+                // println!(
+                //     "Load section:\t{:08x}-{:08x}\tR:{}\tW:{}\tX:{}\tName: {}",
+                //     header.addr(),
+                //     header.addr() + base_data.len() as Pointer - 1,
+                //     readable,
+                //     writable,
+                //     executable,
+                //     String::from_utf8_lossy(header.section_name())
+                // );
 
                 if header.sh_type() != SectionType::SHT_NOBITS {
                     sections.push(MemoryBlock::new(
@@ -118,6 +119,59 @@ impl Kernel {
         }))
     }
 
+    fn build_stack(arguments: impl Into<Vec<String>>) -> Result<(Pointer, MemoryBlock)> {
+        let arguments = arguments.into();
+        let memory_start = STACK_START - STACK_SIZE;
+
+        let mut data = vec![0u8; STACK_SIZE as usize];
+        let mut stack_pointer = STACK_SIZE;
+
+        let mut push = |to_push: &[u8]| {
+            let end = stack_pointer;
+            stack_pointer -= to_push.len() as Pointer;
+            data[stack_pointer as usize..end as usize].copy_from_slice(to_push);
+
+            end
+        };
+
+        let argument_count = arguments.len() as Pointer;
+
+        // Push argument strings.
+        let mut argument_pointers = Vec::new();
+        argument_pointers.reserve(arguments.len());
+
+        for argument in arguments {
+            let argument = CString::new(argument)?;
+            let pointer = push(argument.as_bytes_with_nul());
+            argument_pointers.push(memory_start + pointer);
+        }
+
+        // Push null aux vector.
+        push(&[0u8; POINTER_WIDTH as usize * 2]); // Must end with two null words.
+
+        // Push environment pointers. (unimplemented)
+        push(&[0u8; POINTER_WIDTH as usize]); // Must end with null word.
+
+        // Push argv.
+        // We're actually just reserving space here.
+        push(&[0u8; POINTER_WIDTH as usize]); // Must end with null word.
+        argument_pointers.reverse();
+        for pointer in argument_pointers {
+            // Push arguments on there too.
+            push(&pointer.to_le_bytes());
+        }
+
+        // Push argc.
+        push(&argument_count.to_le_bytes());
+
+        // println!("{:02x?}", data);
+
+        Ok((
+            memory_start + stack_pointer as Pointer,
+            MemoryBlock::new(memory_start, Bytes::Original(data), true, true, false),
+        ))
+    }
+
     pub fn execute(
         &mut self,
         executable: &Executable,
@@ -136,56 +190,17 @@ impl Kernel {
             self.memory.new_blank_block(section.clone())?;
         }
 
-        // Build the stack.
-        // We intentionally build it backwards and then reverse it, because the direction of the x86 stack is backwards in comparison to vectors.
-        // 8byte aligned stack start address.
-        let stack_end = (self.memory.end_address() / POINTER_WIDTH + 1) * POINTER_WIDTH;
-        let mut data: Vec<u8> = Vec::new(); // Stack data.
+        let (stack_pointer, stack) = Self::build_stack(arguments)?;
 
-        // Push the command line arguments onto the stack.
-        let mut argument_pointers: Vec<Pointer> = Vec::new();
-        let argument_count = arguments.len() as Pointer;
-        for argument in arguments {
-            // The pointer to where the value will live on the stack.
-            argument_pointers.push(stack_end + data.len() as Pointer);
-
-            // Insert the string into the stack.
-            let argument = CString::new(argument)?;
-            let argument = argument.as_bytes_with_nul();
-            data.extend(argument.iter().rev());
-        }
-
-        // TODO we need to push on environment variables.
-        data.extend([0u8; POINTER_WIDTH as usize].iter()); // The last argument pointer must be a null.
-
-        // TODO add Auxilary vector.
-        data.extend([0u8; POINTER_WIDTH as usize * 2].iter()); // The last auxilary variable must be null,null.
-
-        // TODO add Environment vector.
-        data.extend([0u8; POINTER_WIDTH as usize].iter()); // The last environment variable pointer must be null.
-
-        // Create an array of pointers to the command line arguments.
-        for pointer in argument_pointers {
-            let pointer = pointer.to_be_bytes();
-            data.extend(pointer.iter());
-        }
-        data.extend([0u8; POINTER_WIDTH as usize].iter()); // The last argument pointer must be a null.
-
-        // Push the argument count.
-        data.extend(argument_count.to_le_bytes().iter());
-
-        // Set stack pointer to top of stack.
-        registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] =
-            stack_end + data.len() as Pointer;
-
-        // Finally, reverse and resize the stack array.
-        data.reverse();
-        data.resize(STACK_SIZE as usize, 0);
-
-        // Create the stack's memory block.
-        let stack = MemoryBlock::new(stack_end, Bytes::Original(data), true, true, false);
+        println!("STACK POINTER: {:08x}", stack_pointer);
+        println!("STACK RANGE: {:08x?}", stack.range());
 
         self.memory.new_block(stack)?;
+        registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] = stack_pointer;
+
+        // This function pointer is to be reigstered with atexit(BA_OS) by the program.
+        // TODO make this actually point to something.
+        registers.general_purpose_registers[GeneralPurposeRegister::Rdx as usize] = 0xdeafbeef;
 
         let entry_point = executable.entry_point;
         registers.rip = entry_point;

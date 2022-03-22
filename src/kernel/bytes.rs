@@ -67,3 +67,50 @@ impl DerefMut for Bytes {
         }
     }
 }
+
+#[test]
+fn from_static() {
+    let data = b"test";
+    let mut bytes = Bytes::from_static(data);
+    assert_eq!(&*bytes, data);
+
+    let static_clone = Bytes::clone(&bytes);
+    assert_eq!(&*static_clone, data);
+
+    // Modifcation will result in a new vector.
+    let test2 = b"tset";
+    bytes.copy_from_slice(test2);
+    assert_eq!(&*bytes, test2);
+    assert_ne!(&*static_clone, test2);
+}
+
+#[test]
+fn from_vec() {
+    let data = b"test";
+    let vec = data.to_vec();
+    let bytes = Bytes::from_vec(vec);
+    assert_eq!(&*bytes, data);
+
+    let vec_clone = Bytes::clone(&bytes);
+    assert_eq!(&*vec_clone, data);
+}
+
+#[test]
+fn reference() {
+    let data = b"test";
+    let vec = data.to_vec();
+    let bytes = Bytes::reference(Arc::new(vec));
+    assert_eq!(&*bytes, data);
+
+    let mut reference = Bytes::clone(&bytes);
+
+    assert_eq!(*reference, *bytes);
+
+    // They should be the same pointer.
+    assert_eq!(reference.as_ptr(), bytes.as_ptr());
+
+    reference.reverse();
+
+    // Now they should be different.
+    assert_ne!(reference.as_ptr(), bytes.as_ptr());
+}

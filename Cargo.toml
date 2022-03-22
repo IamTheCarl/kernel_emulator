@@ -10,3 +10,6 @@ thiserror = "1.0.30"
 yaxpeax-x86 = "1.1.4"
 yaxpeax-arch = "0.2.7"
 segmap = "0.1.0"
+
+[dev-dependencies]
+unicorn-engine = "2.0.0-rc6"
