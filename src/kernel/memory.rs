@@ -94,7 +94,7 @@ impl SystemMemory {
 
             block_data.copy_from_slice(&data[..length]);
 
-            println!("RANDOM WRITE: {:02x?}", block_data);
+            // println!("RANDOM WRITE: {:02x?}", block_data);
 
             Ok(())
         } else {
@@ -152,18 +152,17 @@ impl SystemMemory {
                 start: **gap.start_value().expect("Infinite memory secton."),
                 end: **gap.end_value().expect("Infinite memory secton."),
             })
-            .filter(|gap| {
-                range.contains(&gap.start)
-                    || range.contains(&gap.end)
-                    || gap.contains(&range.start)
-                    || gap.contains(&range.end)
+            .filter(|gap| gap.end >= range.start && gap.start <= range.end)
+            .map(|gap| Range {
+                start: std::cmp::max(gap.start, range.start),
+                end: std::cmp::min(gap.end, range.end),
             })
             .collect();
 
         println!("ADD BLANK SECTION {}: {:016x?}", block.name, gaps);
 
         // We need to keep track of where the end is.
-        let mut max = 0;
+        let mut max = range.start;
         let mut index = 0;
         for gap in gaps {
             max = std::cmp::max(max, gap.end);
@@ -189,6 +188,35 @@ impl SystemMemory {
 
                 self.new_block(block)?;
             }
+        }
+
+        let end_block_length = range.end + 1 - max;
+
+        if end_block_length > 0 {
+            let data = Bytes::Original(vec![0u8; end_block_length as usize]);
+            let block = MemoryBlock::new(
+                format!("{}-{}", block.name, index),
+                max,
+                data,
+                block.read,
+                block.write,
+                block.execute,
+            );
+
+            println!("BLANK BLOCK {}: {:08x}-{:08x}", block.name, max, range.end);
+
+            // We ignore errors here because there's actually a good chance this section is overlapping, and
+            // if that's the case, I'm totally fine with just failing this.
+            self.new_block(block).ok();
+        }
+
+        // Verify that every point exists.
+        for i in range {
+            debug_assert!(
+                self.segments.get(&i).is_some(),
+                "Missing address: {:016x}",
+                i
+            );
         }
 
         Ok(())
