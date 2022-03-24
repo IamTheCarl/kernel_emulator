@@ -1,6 +1,6 @@
 use crate::kernel::{
     memory::{Error as MemoryError, SystemMemory},
-    Pointer,
+    GetValueSize, IntoValue, Pointer, Value, ValueSize,
 };
 use thiserror::Error;
 use yaxpeax_arch::LengthedInstruction;
@@ -53,14 +53,20 @@ impl RegisterFile {
         }
     }
 
-    pub fn get(&self, register: RegSpec) -> u64 {
+    pub fn get(&self, register: RegSpec) -> Value {
         match register.class() {
-            register_class::Q => self.general_purpose_registers[register.num() as usize],
-            register_class::D => {
-                self.general_purpose_registers[register.num() as usize] & 0xFFFF_FFFF
+            register_class::Q => {
+                Value::Quad(self.general_purpose_registers[register.num() as usize])
             }
-            register_class::W => self.general_purpose_registers[register.num() as usize] & 0xFFFF,
-            register_class::B => self.general_purpose_registers[register.num() as usize] & 0xFF,
+            register_class::D => {
+                Value::Double(self.general_purpose_registers[register.num() as usize] as u32)
+            }
+            register_class::W => {
+                Value::Word(self.general_purpose_registers[register.num() as usize] as u16)
+            }
+            register_class::B => {
+                Value::Byte(self.general_purpose_registers[register.num() as usize] as u8)
+            }
             register_class::RB => unimplemented!(),
             register_class::CR => unimplemented!(),
             register_class::DR => unimplemented!(),
@@ -71,29 +77,26 @@ impl RegisterFile {
             register_class::ST => unimplemented!(),
             register_class::MM => unimplemented!(),
             register_class::K => unimplemented!(),
-            register_class::RIP => self.rip,
-            register_class::EIP => self.rip & 0xFFFF_FFFF,
+            register_class::RIP => Value::Quad(self.rip),
+            register_class::EIP => Value::Double(self.rip as u32),
             register_class::RFLAGS => unimplemented!(),
             register_class::EFLAGS => unimplemented!(),
         }
     }
 
-    pub fn set<T>(&mut self, register: RegSpec, value: T)
-    where
-        T: Into<u64>,
-    {
-        let value = value.into();
-
+    pub fn set(&mut self, register: RegSpec, value: Value) {
         match register.class() {
-            register_class::Q => self.general_purpose_registers[register.num() as usize] = value,
+            register_class::Q => {
+                self.general_purpose_registers[register.num() as usize] = value.as_pointer()
+            }
             register_class::D => {
-                self.general_purpose_registers[register.num() as usize] = value & 0xFFFF_FFFF
+                self.general_purpose_registers[register.num() as usize] = value.as_pointer()
             }
             register_class::W => {
-                self.general_purpose_registers[register.num() as usize] = value & 0xFFFF
+                self.general_purpose_registers[register.num() as usize] = value.as_pointer()
             }
             register_class::B => {
-                self.general_purpose_registers[register.num() as usize] = value & 0xFF
+                self.general_purpose_registers[register.num() as usize] = value.as_pointer()
             }
             register_class::RB => unimplemented!(),
             register_class::CR => unimplemented!(),
@@ -105,8 +108,8 @@ impl RegisterFile {
             register_class::ST => unimplemented!(),
             register_class::MM => unimplemented!(),
             register_class::K => unimplemented!(),
-            register_class::RIP => self.rip = value,
-            register_class::EIP => self.rip = value & 0xFFFF_FFFF,
+            register_class::RIP => self.rip = value.as_pointer(),
+            register_class::EIP => self.rip = value.as_pointer(),
             register_class::RFLAGS => unimplemented!(),
             register_class::EFLAGS => unimplemented!(),
         }
@@ -216,16 +219,17 @@ fn read_operand(
     memory: &SystemMemory,
     registers: &RegisterFile,
     operand: &Operand,
-) -> Result<Pointer> {
+    value_size: ValueSize,
+) -> Result<Value> {
     Ok(match *operand {
-        Operand::ImmediateI8(v) => v as Pointer,
-        Operand::ImmediateU8(v) => v as Pointer,
-        Operand::ImmediateI16(v) => v as Pointer,
-        Operand::ImmediateU16(v) => v as Pointer,
-        Operand::ImmediateI32(v) => v as Pointer,
-        Operand::ImmediateU32(v) => v as Pointer,
-        Operand::ImmediateI64(v) => v as Pointer,
-        Operand::ImmediateU64(v) => v as Pointer,
+        Operand::ImmediateI8(v) => Value::Byte(v as u8).dynamic_signed_cast(value_size),
+        Operand::ImmediateU8(v) => Value::Byte(v).dynamic_cast(value_size),
+        Operand::ImmediateI16(v) => Value::Word(v as u16).dynamic_signed_cast(value_size),
+        Operand::ImmediateU16(v) => Value::Word(v).dynamic_cast(value_size),
+        Operand::ImmediateI32(v) => Value::Double(v as u32).dynamic_signed_cast(value_size),
+        Operand::ImmediateU32(v) => Value::Double(v).dynamic_cast(value_size),
+        Operand::ImmediateI64(v) => Value::Quad(v as u64).dynamic_signed_cast(value_size),
+        Operand::ImmediateU64(v) => Value::Quad(v).dynamic_cast(value_size),
         Operand::Register(spec) => registers.get(spec),
         // Operand::RegisterMaskMerge(_, _, _) => todo!(),
         // Operand::RegisterMaskMergeSae(_, _, _, _) => todo!(),
@@ -234,42 +238,35 @@ fn read_operand(
         // Operand::DisplacementU64(_) => todo!(),
         // Operand::RegDeref(_) => todo!(),
         Operand::RegDisp(spec, displacement) => {
-            let address = registers.get(spec).wrapping_add(displacement as Pointer);
-            let mut value = [0u8; 8];
-            let width = spec.width() as Pointer;
+            let address = registers
+                .get(spec)
+                .as_pointer()
+                .wrapping_add(displacement as Pointer);
 
-            memory.read_random(address, &mut value[..width as usize])?;
-            Pointer::from_le_bytes(value)
+            memory.read_random(address, value_size)?
         }
         // Operand::RegScale(_, _) => todo!(),
         // Operand::RegIndexBase(_, _) => todo!(),
         // Operand::RegIndexBaseDisp(_, _, _) => todo!(),
         // Operand::RegScaleDisp(_, _, _) => todo!(),
         Operand::RegIndexBaseScale(base, offset, offset_scale) => {
-            let base_address = registers.get(base);
-            let offset = registers.get(offset);
+            let base_address = registers.get(base).as_pointer();
+            let offset = registers.get(offset).as_pointer();
             let address = base_address.wrapping_add(offset.wrapping_mul(offset_scale as Pointer));
 
-            let mut value = [0u8; 8];
-            let width = base.width() as Pointer;
-
-            memory.read_random(address, &mut value[..width as usize])?;
-
-            Pointer::from_le_bytes(value)
+            memory.read_random(address, value_size)?
         }
         Operand::RegIndexBaseScaleDisp(base, offset, offset_scale, displacement) => {
-            let base_address = registers.get(base);
-            let offset = registers.get(offset).wrapping_mul(offset_scale as Pointer);
+            let base_address = registers.get(base).as_pointer();
+            let offset = registers
+                .get(offset)
+                .as_pointer()
+                .wrapping_mul(offset_scale as Pointer);
             let address = base_address
                 .wrapping_add(offset)
-                .wrapping_add(displacement as u64);
+                .wrapping_add(displacement as Pointer);
 
-            let mut value = [0u8; 8];
-            let width = base.width() as Pointer;
-
-            memory.read_random(address, &mut value[..width as usize])?;
-
-            Pointer::from_le_bytes(value)
+            memory.read_random(address, value_size)?
         }
         // Operand::RegDerefMasked(_, _) => todo!(),
         // Operand::RegDispMasked(_, _, _) => todo!(),
@@ -291,12 +288,8 @@ fn write_target(
     memory: &SystemMemory,
     registers: &mut RegisterFile,
     operand: Operand,
-    value: Pointer,
-    value_width: Option<u8>,
+    value: Value,
 ) -> Result<()> {
-    let value_width =
-        value_width.unwrap_or_else(|| operand.width().expect("Could not get a width."));
-
     match operand {
         Operand::Register(spec) => registers.set(spec, value),
         // Operand::ImmediateI8(_) => todo!(),
@@ -314,10 +307,12 @@ fn write_target(
         // Operand::DisplacementU64(_) => todo!(),
         // Operand::RegDeref(_) => todo!(),
         Operand::RegDisp(spec, displacement) => {
-            let address = registers.get(spec).wrapping_add(displacement as Pointer);
-            let value = value.to_le_bytes();
+            let address = registers
+                .get(spec)
+                .as_pointer()
+                .wrapping_add(displacement as Pointer);
 
-            memory.write_random(address, &value[..value_width as usize])?;
+            memory.write_random(address, value)?;
         }
         // Operand::RegScale(_, _) => todo!(),
         // Operand::RegIndexBase(_, _) => todo!(),
@@ -346,15 +341,15 @@ fn write_target(
 fn push_onto_stack(
     memory: &SystemMemory,
     registers: &mut RegisterFile,
-    value: &[u8],
+    value: Value,
 ) -> Result<()> {
     let stack_pointer = registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize]
         - value.len() as Pointer;
     registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] = stack_pointer;
 
-    memory.write_random(stack_pointer, value)?;
+    // println!("PUSH {:08x}: {}", stack_pointer, value);
 
-    // println!("PUSH {:08x}: {:02x?}", stack_pointer, value);
+    memory.write_random(stack_pointer, value)?;
 
     Ok(())
 }
@@ -362,17 +357,17 @@ fn push_onto_stack(
 fn pop_from_stack(
     memory: &SystemMemory,
     registers: &mut RegisterFile,
-    value: &mut [u8],
-) -> Result<()> {
+    value_size: ValueSize,
+) -> Result<Value> {
     let stack_pointer = registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize];
-    memory.read_random(stack_pointer, value)?;
+    let value = memory.read_random(stack_pointer, value_size)?;
 
     registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] +=
         value.len() as Pointer;
 
-    // println!("POP {:08x}: {:02x?}", stack_pointer, value);
+    // println!("POP {:08x}: {}", stack_pointer, value);
 
-    Ok(())
+    Ok(value)
 }
 
 pub fn run_instruction(
@@ -381,63 +376,81 @@ pub fn run_instruction(
     instruction: &Instruction,
 ) -> Result<InstructionResult> {
     let instruction_length = instruction.len().to_const();
-    let next_instruction_address = registers.rip + instruction_length;
 
     // println!("REGISTERS: {:016x?}", registers);
 
-    let mut instruction_bytes = [0u8; 15];
+    // let mut instruction_bytes = [0u8; 15];
 
-    memory.read_random(
-        registers.rip,
-        &mut instruction_bytes[..instruction_length as usize],
-    )?;
-    println!(
-        "{:08x} {:<30}{}",
-        registers.rip,
-        format!("{:02x?}", &instruction_bytes[..instruction_length as usize]),
-        instruction
-    );
+    // memory.read_random(
+    //     registers.rip,
+    //     &mut instruction_bytes[..instruction_length as usize],
+    // )?;
+    // println!(
+    //     "{:08x} {:<30}{}",
+    //     registers.rip,
+    //     format!("{:02x?}", &instruction_bytes[..instruction_length as usize]),
+    //     instruction
+    // );
+
+    println!("{:08x} {}", registers.rip, instruction);
+
+    // Update instruction pointer.
+    registers.rip += instruction_length;
 
     match instruction.opcode() {
         Opcode::Invalid => unimplemented!(), // TODO this should fire a signal.
         Opcode::ADD => {
-            let a = read_operand(memory, registers, &instruction.operand(0))?;
-            let b = read_operand(memory, registers, &instruction.operand(1))?;
-            write_target(
-                memory,
-                registers,
-                instruction.operand(0),
-                a.wrapping_add(b),
-                None,
-            )?;
+            let source = instruction.operand(1);
+            let target = instruction.operand(0);
+
+            let a = read_operand(memory, registers, &target, target.value_size())?.as_quad();
+            let b = read_operand(memory, registers, &source, target.value_size())?.as_quad();
+            let result = a.wrapping_add(b).into_value(target.value_size());
+
+            write_target(memory, registers, instruction.operand(0), result)?;
         }
         Opcode::OR => {
-            let a = read_operand(memory, registers, &instruction.operand(0))?;
-            let b = read_operand(memory, registers, &instruction.operand(1))?;
-            write_target(memory, registers, instruction.operand(0), a | b, None)?;
+            let source = instruction.operand(1);
+            let target = instruction.operand(0);
+
+            let a = read_operand(memory, registers, &target, target.value_size())?.as_quad();
+            let b = read_operand(memory, registers, &source, target.value_size())?.as_quad();
+            let result = (a | b).into_value(target.value_size());
+
+            write_target(memory, registers, instruction.operand(0), result)?;
         }
         // Opcode::ADC => todo!(),
         // Opcode::SBB => todo!(),
         Opcode::AND => {
-            let a = read_operand(memory, registers, &instruction.operand(0))?;
-            let b = read_operand(memory, registers, &instruction.operand(1))?;
-            write_target(memory, registers, instruction.operand(0), a & b, None)?;
+            let source = instruction.operand(1);
+            let target = instruction.operand(0);
+
+            let a = read_operand(memory, registers, &target, target.value_size())?.as_quad();
+            let b = read_operand(memory, registers, &source, target.value_size())?.as_quad();
+
+            let result = (a & b).into_value(target.value_size());
+
+            write_target(memory, registers, instruction.operand(0), result)?;
         }
         Opcode::XOR => {
-            let a = read_operand(memory, registers, &instruction.operand(0))?;
-            let b = read_operand(memory, registers, &instruction.operand(1))?;
-            write_target(memory, registers, instruction.operand(0), a ^ b, None)?;
+            let source = instruction.operand(1);
+            let target = instruction.operand(0);
+
+            let a = read_operand(memory, registers, &target, target.value_size())?.as_quad();
+            let b = read_operand(memory, registers, &source, target.value_size())?.as_quad();
+            let result = (a ^ b).into_value(target.value_size());
+
+            write_target(memory, registers, instruction.operand(0), result)?;
         }
         Opcode::SUB => {
-            let a = read_operand(memory, registers, &instruction.operand(0))?;
-            let b = read_operand(memory, registers, &instruction.operand(1))?;
-            write_target(
-                memory,
-                registers,
-                instruction.operand(0),
-                a.wrapping_sub(b),
-                None,
-            )?;
+            let source = instruction.operand(1);
+            let target = instruction.operand(0);
+
+            let a = read_operand(memory, registers, &target, target.value_size())?.as_quad();
+            let b = read_operand(memory, registers, &source, target.value_size())?.as_quad();
+            let result = a.wrapping_sub(b).into_value(target.value_size());
+
+            write_target(memory, registers, instruction.operand(0), result)?;
         }
         // Opcode::CMP => todo!(),
         // Opcode::XADD => todo!(),
@@ -491,14 +504,16 @@ pub fn run_instruction(
             let target = instruction.operand(0);
             let source = instruction.operand(1);
 
-            let mut to_move = read_operand(memory, registers, &instruction.operand(1))?;
+            let size = source.try_value_size().unwrap_or_else(|| {
+                instruction
+                    .try_value_size()
+                    .unwrap_or_else(|| target.value_size())
+            });
 
-            let width = target.width().expect("Operand does not have width.") as Pointer;
+            let to_move = read_operand(memory, registers, &source, size)?;
+            let to_move = to_move.dynamic_signed_cast(target.value_size());
 
-            to_move <<= (8 - width) * 8;
-            to_move >>= (8 - width) * 8; // Should sign extend.
-
-            write_target(memory, registers, target, to_move, source.width())?;
+            write_target(memory, registers, target, to_move)?;
         }
         // Opcode::SAR => todo!(),
         // Opcode::SAL => todo!(),
@@ -515,16 +530,14 @@ pub fn run_instruction(
         Opcode::CALL => {
             // Get the return pointer and push that onto the stack.
             // We need that to return later.
-            let return_pointer = next_instruction_address;
-            let return_pointer = return_pointer.to_le_bytes();
-            push_onto_stack(memory, registers, &return_pointer)?;
+            let return_pointer = registers.rip;
+            push_onto_stack(memory, registers, Value::Quad(return_pointer))?;
 
             // Get the new address we're jumping to.
-            let new_address = next_instruction_address.wrapping_add(read_operand(
-                memory,
-                registers,
-                &instruction.operand(0),
-            )?);
+            let new_address = registers.rip.wrapping_add(
+                read_operand(memory, registers, &instruction.operand(0), ValueSize::Quad)?
+                    .as_pointer(),
+            );
 
             return Ok(InstructionResult::Jump(new_address));
         }
@@ -534,55 +547,27 @@ pub fn run_instruction(
         Opcode::PUSH => {
             // We need to figure out the width of our instruction.
             let operand = instruction.operand(0);
-            let mem_size = operand.width().expect("Could not get operand width.") as usize;
-            let value = read_operand(memory, registers, &operand)?;
-            let value = value.to_le_bytes();
+            let value = read_operand(memory, registers, &operand, operand.value_size())?;
 
-            push_onto_stack(memory, registers, &value[..mem_size])?;
+            push_onto_stack(memory, registers, value)?;
         }
         Opcode::POP => {
-            // We need to figure out the width of our instruction.
-            let mem_size = instruction
-                .mem_size()
-                .map(|size| {
-                    size.bytes_size()
-                        .expect("Could not get instruction operand width.")
-                })
-                .unwrap_or(8);
-
-            // Reading the value is more convoluted than you may expect.
-            let mem_size = instruction.operand(0).width().unwrap_or(mem_size);
-            let mut value = [0u8; 8];
-
-            pop_from_stack(memory, registers, &mut value[..mem_size as usize])?;
-            let value = Pointer::from_le_bytes(value);
-
-            write_target(
-                memory,
-                registers,
-                instruction.operand(0),
-                value,
-                Some(mem_size),
-            )?;
+            let target = instruction.operand(0);
+            let value = pop_from_stack(memory, registers, target.value_size())?;
+            write_target(memory, registers, target, value)?;
         }
         Opcode::LEA => {
-            let load_address = read_operand(memory, registers, &instruction.operand(1))?;
-            let mem_size = instruction
-                .mem_size()
-                .expect("LEA instruction did not access memory.")
-                .bytes_size()
-                .expect("LEA memory access is not in bytes.");
+            let target = instruction.operand(0);
+            let source = instruction.operand(1);
 
-            let mut value = [0u8; 8];
-            memory.read_random(load_address, &mut value[..mem_size as usize])?;
+            let size = source.try_value_size().unwrap_or_else(|| {
+                target
+                    .try_value_size()
+                    .unwrap_or_else(|| instruction.value_size())
+            });
 
-            write_target(
-                memory,
-                registers,
-                instruction.operand(0),
-                Pointer::from_le_bytes(value),
-                Some(mem_size),
-            )?;
+            let value = read_operand(memory, registers, &source, size)?;
+            write_target(memory, registers, target, value)?;
         }
         Opcode::NOP => {
             // Easy.
@@ -605,15 +590,20 @@ pub fn run_instruction(
             let source = instruction.operand(1);
             let target = instruction.operand(0);
 
-            let to_move = read_operand(memory, registers, &instruction.operand(1))?;
-            write_target(memory, registers, target, to_move, source.width())?;
+            let size = source.try_value_size().unwrap_or_else(|| {
+                target
+                    .try_value_size()
+                    .unwrap_or_else(|| instruction.value_size())
+            });
+
+            let to_move = read_operand(memory, registers, &source, size)?;
+
+            write_target(memory, registers, target, to_move)?;
         }
         Opcode::RETURN => {
-            let mut return_pointer = [0u8; 8];
-            pop_from_stack(memory, registers, &mut return_pointer)?;
-            let return_pointer = Pointer::from_le_bytes(return_pointer);
+            let return_pointer = pop_from_stack(memory, registers, ValueSize::Quad)?;
 
-            return Ok(InstructionResult::Jump(return_pointer));
+            return Ok(InstructionResult::Jump(return_pointer.as_pointer()));
         }
         // Opcode::PUSHF => todo!(),
         // Opcode::WAIT => todo!(),
@@ -631,9 +621,11 @@ pub fn run_instruction(
         // Opcode::SCAS => todo!(),
         // Opcode::MOVS => todo!(),
         Opcode::TEST => {
-            let a = read_operand(memory, registers, &instruction.operand(0))?;
-            let b = read_operand(memory, registers, &instruction.operand(0))?;
+            let a = instruction.operand(1);
+            let b = instruction.operand(0);
 
+            let a = read_operand(memory, registers, &a, a.value_size())?.as_quad();
+            let b = read_operand(memory, registers, &b, b.value_size())?.as_quad();
             let result = a & b;
 
             registers.zf = result == 0;
@@ -652,11 +644,10 @@ pub fn run_instruction(
         Opcode::JZ => {
             if registers.zf {
                 // Zero flag is set. We jump!
-                let address = next_instruction_address.wrapping_add(read_operand(
-                    memory,
-                    registers,
-                    &instruction.operand(0),
-                )?);
+                let address = registers.rip.wrapping_add(
+                    read_operand(memory, registers, &instruction.operand(0), ValueSize::Quad)?
+                        .as_pointer(),
+                );
 
                 return Ok(InstructionResult::Jump(address));
             }
@@ -1966,9 +1957,6 @@ pub fn run_instruction(
             panic!("Unimplemented instruction: {}", instruction);
         }
     }
-
-    // Update instruction pointer.
-    registers.rip = next_instruction_address;
 
     Ok(InstructionResult::Continue)
 }

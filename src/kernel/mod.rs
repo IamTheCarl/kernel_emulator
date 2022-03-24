@@ -44,6 +44,362 @@ pub struct Executable {
 }
 
 pub type Pointer = u64;
+
+#[derive(Clone)]
+pub enum Value {
+    Byte(u8),
+    Word(u16),
+    Double(u32),
+    Quad(u64),
+}
+
+impl Value {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        match bytes.len() {
+            1 => Self::Byte({
+                let mut integer_bytes = [0u8; 1];
+                integer_bytes.copy_from_slice(bytes);
+
+                u8::from_le_bytes(integer_bytes)
+            }),
+            2 => Self::Word({
+                let mut integer_bytes = [0u8; 2];
+                integer_bytes.copy_from_slice(bytes);
+
+                u16::from_le_bytes(integer_bytes)
+            }),
+            4 => Self::Double({
+                let mut integer_bytes = [0u8; 4];
+                integer_bytes.copy_from_slice(bytes);
+
+                u32::from_le_bytes(integer_bytes)
+            }),
+            8 => Self::Quad({
+                let mut integer_bytes = [0u8; 8];
+                integer_bytes.copy_from_slice(bytes);
+
+                u64::from_le_bytes(integer_bytes)
+            }),
+            _ => panic!("Unsupported value width: {}", bytes.len()),
+        }
+    }
+
+    pub fn as_pointer(&self) -> Pointer {
+        match self {
+            Self::Byte(v) => *v as Pointer,
+            Self::Word(v) => *v as Pointer,
+            Self::Double(v) => *v as Pointer,
+            Self::Quad(v) => *v as Pointer,
+        }
+    }
+
+    pub fn as_quad(&self) -> u64 {
+        match self {
+            Self::Byte(v) => *v as u64,
+            Self::Word(v) => *v as u64,
+            Self::Double(v) => *v as u64,
+            Self::Quad(v) => *v as u64,
+        }
+    }
+
+    pub fn as_double(&self) -> u32 {
+        match self {
+            Self::Byte(v) => *v as u32,
+            Self::Word(v) => *v as u32,
+            Self::Double(v) => *v as u32,
+            Self::Quad(v) => *v as u32,
+        }
+    }
+
+    pub fn as_word(&self) -> u16 {
+        match self {
+            Self::Byte(v) => *v as u16,
+            Self::Word(v) => *v as u16,
+            Self::Double(v) => *v as u16,
+            Self::Quad(v) => *v as u16,
+        }
+    }
+
+    pub fn as_byte(&self) -> u8 {
+        match self {
+            Self::Byte(v) => *v as u8,
+            Self::Word(v) => *v as u8,
+            Self::Double(v) => *v as u8,
+            Self::Quad(v) => *v as u8,
+        }
+    }
+
+    pub fn as_signed_quad(&self) -> i64 {
+        match self {
+            Self::Byte(v) => *v as i8 as i64,
+            Self::Word(v) => *v as i16 as i64,
+            Self::Double(v) => *v as i32 as i64,
+            Self::Quad(v) => *v as i64,
+        }
+    }
+
+    pub fn as_signed_double(&self) -> i32 {
+        match self {
+            Self::Byte(v) => *v as i8 as i32,
+            Self::Word(v) => *v as i16 as i32,
+            Self::Double(v) => *v as i32,
+            Self::Quad(v) => *v as i32,
+        }
+    }
+
+    pub fn as_signed_word(&self) -> i16 {
+        match self {
+            Self::Byte(v) => *v as i8 as i16,
+            Self::Word(v) => *v as i16,
+            Self::Double(v) => *v as i16,
+            Self::Quad(v) => *v as i16,
+        }
+    }
+
+    pub fn as_signed_byte(&self) -> i8 {
+        match self {
+            Self::Byte(v) => *v as i8,
+            Self::Word(v) => *v as i8,
+            Self::Double(v) => *v as i8,
+            Self::Quad(v) => *v as i8,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 8] {
+        let mut bytes = [0u8; 8];
+
+        match self {
+            Self::Byte(v) => bytes[..1].copy_from_slice(&v.to_le_bytes()),
+            Self::Word(v) => bytes[..2].copy_from_slice(&v.to_le_bytes()),
+            Self::Double(v) => bytes[..4].copy_from_slice(&v.to_le_bytes()),
+            Self::Quad(v) => bytes.copy_from_slice(&v.to_le_bytes()),
+        }
+
+        bytes
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Byte(_) => 1,
+            Self::Word(_) => 2,
+            Self::Double(_) => 4,
+            Self::Quad(_) => 8,
+        }
+    }
+
+    pub fn dynamic_cast(&self, new_size: ValueSize) -> Self {
+        match new_size {
+            ValueSize::Byte => Value::Byte(self.as_byte()),
+            ValueSize::Word => Value::Word(self.as_word()),
+            ValueSize::Double => Value::Double(self.as_double()),
+            ValueSize::Quad => Value::Quad(self.as_quad()),
+            _ => panic!("Invalid operand size."),
+        }
+    }
+
+    pub fn dynamic_signed_cast(&self, new_size: ValueSize) -> Self {
+        match new_size {
+            ValueSize::Byte => Value::Byte(self.as_signed_byte() as u8),
+            ValueSize::Word => Value::Word(self.as_signed_word() as u16),
+            ValueSize::Double => Value::Double(self.as_signed_double() as u32),
+            ValueSize::Quad => Value::Quad(self.as_signed_quad() as u64),
+            _ => panic!("Invalid operand size."),
+        }
+    }
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Byte(v) => write!(f, "{:02x}", v),
+            Value::Word(v) => write!(f, "{:04x}", v),
+            Value::Double(v) => write!(f, "{:08x}", v),
+            Value::Quad(v) => write!(f, "{:016x}", v),
+        }
+    }
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Byte(v) => write!(f, "{:02x}", v),
+            Value::Word(v) => write!(f, "{:04x}", v),
+            Value::Double(v) => write!(f, "{:08x}", v),
+            Value::Quad(v) => write!(f, "{:016x}", v),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ValueSize {
+    Byte,
+    Word,
+    Double,
+    Quad,
+}
+
+impl ValueSize {
+    pub fn new(size: u8) -> Self {
+        match size {
+            1 => ValueSize::Byte,
+            2 => ValueSize::Word,
+            4 => ValueSize::Double,
+            8 => ValueSize::Quad,
+            _ => panic!("Invalid operand size."),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            ValueSize::Byte => 1,
+            ValueSize::Word => 2,
+            ValueSize::Double => 4,
+            ValueSize::Quad => 8,
+        }
+    }
+}
+
+trait GetValueSize {
+    fn value_size(&self) -> ValueSize {
+        self.try_value_size().expect("Value does not have width.")
+    }
+    fn try_value_size(&self) -> Option<ValueSize>;
+}
+
+impl GetValueSize for yaxpeax_x86::long_mode::RegSpec {
+    fn try_value_size(&self) -> Option<ValueSize> {
+        use yaxpeax_x86::long_mode::register_class;
+
+        Some(match self.class() {
+            register_class::Q => ValueSize::Quad,
+            register_class::D => ValueSize::Double,
+            register_class::W => ValueSize::Word,
+            register_class::B => ValueSize::Byte,
+            register_class::RB => unimplemented!(),
+            register_class::CR => unimplemented!(),
+            register_class::DR => unimplemented!(),
+            register_class::S => unimplemented!(),
+            register_class::X => unimplemented!(),
+            register_class::Y => unimplemented!(),
+            register_class::Z => unimplemented!(),
+            register_class::ST => unimplemented!(),
+            register_class::MM => unimplemented!(),
+            register_class::K => unimplemented!(),
+            register_class::RIP => ValueSize::Quad,
+            register_class::EIP => ValueSize::Double,
+            register_class::RFLAGS => unimplemented!(),
+            register_class::EFLAGS => unimplemented!(),
+        })
+    }
+}
+
+impl GetValueSize for yaxpeax_x86::long_mode::Operand {
+    fn try_value_size(&self) -> Option<ValueSize> {
+        if let Some(width) = self.width() {
+            match width {
+                1 => Some(ValueSize::Byte),
+                2 => Some(ValueSize::Word),
+                4 => Some(ValueSize::Double),
+                8 => Some(ValueSize::Quad),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl GetValueSize for yaxpeax_x86::long_mode::Instruction {
+    fn try_value_size(&self) -> Option<ValueSize> {
+        if let Some(width) = self
+            .mem_size()
+            .and_then(|memory_size| memory_size.bytes_size())
+        {
+            match width {
+                1 => Some(ValueSize::Byte),
+                2 => Some(ValueSize::Word),
+                4 => Some(ValueSize::Double),
+                8 => Some(ValueSize::Quad),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl From<u64> for Value {
+    fn from(val: u64) -> Self {
+        Value::Quad(val)
+    }
+}
+
+impl From<u32> for Value {
+    fn from(val: u32) -> Self {
+        Value::Double(val)
+    }
+}
+
+impl From<u16> for Value {
+    fn from(val: u16) -> Self {
+        Value::Word(val)
+    }
+}
+
+impl From<u8> for Value {
+    fn from(val: u8) -> Self {
+        Value::Byte(val)
+    }
+}
+
+pub trait IntoValue {
+    fn into_value(self, size: ValueSize) -> Value;
+}
+
+impl IntoValue for u64 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as u16),
+            ValueSize::Double => Value::Double(self as u32),
+            ValueSize::Quad => Value::Quad(self as u64),
+        }
+    }
+}
+
+impl IntoValue for u32 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as u16),
+            ValueSize::Double => Value::Double(self as u32),
+            ValueSize::Quad => Value::Quad(self as u64),
+        }
+    }
+}
+
+impl IntoValue for u16 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as u16),
+            ValueSize::Double => Value::Double(self as u32),
+            ValueSize::Quad => Value::Quad(self as u64),
+        }
+    }
+}
+
+impl IntoValue for u8 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as u16),
+            ValueSize::Double => Value::Double(self as u32),
+            ValueSize::Quad => Value::Quad(self as u64),
+        }
+    }
+}
+
 pub const POINTER_WIDTH: Pointer = std::mem::size_of::<Pointer>() as Pointer;
 pub const STACK_SIZE: Pointer = 4 * 1024; // 4 Kb
 pub const STACK_START: Pointer = 0x7FFFFFFFFFFFFFFF;
@@ -82,18 +438,19 @@ impl Kernel {
                 flags & SectionHeaderFlags::SHF_EXECINSTR == SectionHeaderFlags::SHF_EXECINSTR;
 
             if (readable || writable || executable) && base_data.len() > 0 {
-                // println!(
-                //     "Load section:\t{:08x}-{:08x}\tR:{}\tW:{}\tX:{}\tName: {}",
-                //     header.addr(),
-                //     header.addr() + base_data.len() as Pointer - 1,
-                //     readable,
-                //     writable,
-                //     executable,
-                //     String::from_utf8_lossy(header.section_name())
-                // );
+                println!(
+                    "Load section:\t{:08x}-{:08x}\tR:{}\tW:{}\tX:{}\tName: {}",
+                    header.addr(),
+                    header.addr() + base_data.len() as Pointer - 1,
+                    readable,
+                    writable,
+                    executable,
+                    String::from_utf8_lossy(header.section_name())
+                );
 
                 if header.sh_type() != SectionType::SHT_NOBITS {
                     sections.push(MemoryBlock::new(
+                        String::from_utf8_lossy(header.section_name()),
                         header.addr(),
                         Bytes::reference(base_data),
                         readable,
@@ -102,6 +459,7 @@ impl Kernel {
                     ));
                 } else {
                     blank_sections.push(BlankMemoryBlock::new(
+                        String::from_utf8_lossy(header.section_name()),
                         header.addr() as Pointer,
                         base_data.len() as Pointer,
                         readable,
@@ -168,7 +526,14 @@ impl Kernel {
 
         Ok((
             memory_start + stack_pointer as Pointer,
-            MemoryBlock::new(memory_start, Bytes::Original(data), true, true, false),
+            MemoryBlock::new(
+                "stack",
+                memory_start,
+                Bytes::Original(data),
+                true,
+                true,
+                false,
+            ),
         ))
     }
 
