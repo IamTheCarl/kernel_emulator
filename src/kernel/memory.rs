@@ -2,12 +2,9 @@ use crate::kernel::{bytes::Bytes, Pointer, Value, ValueSize};
 use segmap::SegmentMap;
 use std::{
     cell::{Ref, RefCell, RefMut},
-    collections::HashMap,
     ops::{Deref, DerefMut, Range},
 };
 use thiserror::Error;
-use yaxpeax_arch::{Decoder, LengthedInstruction, Reader, U8Reader};
-use yaxpeax_x86::long_mode::{InstDecoder, Instruction};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -27,20 +24,17 @@ pub enum Error {
     #[error("Attempt to access unmapped memory: 0x{0:016x}.")]
     UnmappedAddress(Pointer),
 
-    #[error("Access memory is split between blocks.")]
+    #[error("Memory access operation is split between blocks.")]
     SectionAliacing,
-
-    #[error("Jump to address that aliaces an instruction.")]
-    InvalidInstructionAddress,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct SystemMemory {
+pub struct ProcessMemory {
     segments: SegmentMap<Pointer, RefCell<MemoryBlock>>,
 }
 
-impl SystemMemory {
+impl ProcessMemory {
     pub fn new() -> Self {
         Self {
             segments: SegmentMap::new(),
@@ -70,7 +64,7 @@ impl SystemMemory {
 
         if block.is_read() {
             let data = block.get_range(range)?;
-            // println!("DATA: {:02x?}", data);
+            // println!("READ RANDOM {:016x}: {:02x?}", address, data);
             Ok(Value::from_bytes(data))
         } else {
             Err(Error::WrongMemoryType {
@@ -94,7 +88,7 @@ impl SystemMemory {
 
             block_data.copy_from_slice(&data[..length]);
 
-            // println!("RANDOM WRITE: {:02x?}", block_data);
+            // println!("WRITE RANDOM {:016x}: {:02x?}", address, block_data);
 
             Ok(())
         } else {
@@ -231,8 +225,6 @@ pub struct MemoryBlock {
     execute: bool,
     base_address: Pointer,
     data: Bytes,
-    instructions: Vec<Instruction>,
-    instruction_addresses: HashMap<Pointer, usize>,
 }
 
 impl MemoryBlock {
@@ -246,12 +238,6 @@ impl MemoryBlock {
     ) -> Self {
         let name = name.into();
 
-        let (instruction_addresses, instructions) = if execute {
-            decode_instructions(base_address, &data)
-        } else {
-            (HashMap::new(), Vec::new())
-        };
-
         Self {
             name,
             read,
@@ -259,8 +245,6 @@ impl MemoryBlock {
             execute,
             base_address,
             data,
-            instructions,
-            instruction_addresses,
         }
     }
 }
@@ -282,25 +266,6 @@ impl MemoryBlock {
         self.base_address..(self.base_address + self.data.len() as Pointer - 1)
     }
 
-    pub fn instruction_iterator(&self, address: Pointer) -> Result<InstructionIterator> {
-        if self.is_executable() {
-            let instruction_index = self.instruction_addresses.get(&address).cloned();
-
-            if let Some(instruction_index) = instruction_index {
-                Ok(InstructionIterator { instruction_index })
-            } else {
-                Err(Error::InvalidInstructionAddress)
-            }
-        } else {
-            Err(Error::WrongMemoryType {
-                address,
-                read_wanted: false,
-                write_wanted: false,
-                execute_wanted: true,
-            })
-        }
-    }
-
     pub fn get_range(&self, range: Range<Pointer>) -> Result<&[u8]> {
         let start = range.start - self.base_address;
         let end = range.end - self.base_address;
@@ -313,8 +278,6 @@ impl MemoryBlock {
     pub fn get_range_mut(&mut self, range: Range<Pointer>) -> Result<&mut [u8]> {
         let start = range.start - self.base_address;
         let end = range.end - self.base_address;
-
-        // FIXME we need to rebuild the executable code after the slice is released.
 
         self.data
             .get_mut(start as usize..end as usize)
@@ -378,43 +341,6 @@ impl BlankMemoryBlock {
     }
 }
 
-fn decode_instructions(
-    base_address: Pointer,
-    bytes: &Bytes,
-) -> (HashMap<Pointer, usize>, Vec<Instruction>) {
-    let decoder = InstDecoder::minimal();
-
-    let mut block = U8Reader::new(bytes);
-
-    let mut instructions = Vec::new();
-    let mut instruction_addresses = HashMap::new();
-
-    let mut current_offset = base_address
-        + <U8Reader<'_> as Reader<u16, yaxpeax_arch::U32le>>::total_offset(&mut block) as u64;
-
-    while let Ok(instruction) = decoder.decode(&mut block) {
-        instruction_addresses.insert(current_offset, instructions.len());
-        instructions.push(instruction);
-
-        current_offset += instruction.len();
-    }
-
-    (instruction_addresses, instructions)
-}
-
-pub struct InstructionIterator {
-    instruction_index: usize,
-}
-
-impl InstructionIterator {
-    pub fn next<'a>(&mut self, block: &'a MemoryBlock) -> Option<&'a Instruction> {
-        let old_index = self.instruction_index;
-        self.instruction_index += 1;
-
-        block.instructions.get(old_index)
-    }
-}
-
 #[test]
 fn overlapping_memory() {
     #[cfg(not(tarpaulin_include))]
@@ -431,7 +357,7 @@ fn overlapping_memory() {
         }
     }
 
-    let mut kernel = SystemMemory::new();
+    let mut kernel = ProcessMemory::new();
     kernel
         .new_block(MemoryBlock::new(
             "",
@@ -483,19 +409,4 @@ fn overlapping_memory() {
         false,
     ));
     assert_overlap_failed(result).unwrap();
-}
-
-#[test]
-fn load_instructions() {
-    let mut kernel = SystemMemory::new();
-    kernel
-        .new_block(MemoryBlock::new(
-            "",
-            0,
-            Bytes::from_static(&[0x8b, 0x01, 0x00, 0x00, 0x00]),
-            false,
-            false,
-            true,
-        ))
-        .unwrap();
 }

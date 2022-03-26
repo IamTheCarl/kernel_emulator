@@ -1,5 +1,5 @@
 use elf_rs::{Elf, ElfFile, SectionHeaderFlags, SectionType};
-use std::{ffi::CString, sync::Arc};
+use std::{collections::HashMap, ffi::CString, sync::Arc};
 use syscalls::Sysno;
 use thiserror::Error;
 
@@ -9,8 +9,8 @@ use bytes::Bytes;
 mod memory;
 use memory::*;
 
-mod cpu;
-use cpu::*;
+pub mod process;
+use process::{Process, StepResult};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -24,7 +24,7 @@ pub enum Error {
     Memory(#[from] memory::Error),
 
     #[error("CPU Error: {0}")]
-    Cpu(#[from] cpu::Error),
+    Cpu(#[from] process::Error),
 
     #[error("The end of the exectuable block has been reached.")]
     EndOfExecutableBlock,
@@ -35,6 +35,18 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+pub struct SyscallRequest {
+    process_id: ProcessId,
+    call_code: Pointer,
+    arguments: [Pointer; 6],
+}
+
+pub enum SyscallResult {
+    None,
+    Some(Pointer),
+    Exit,
+}
+
 pub struct Executable {
     // Where execution should start.
     entry_point: Pointer,
@@ -44,6 +56,7 @@ pub struct Executable {
 }
 
 pub type Pointer = u64;
+pub type ProcessId = u64;
 
 #[derive(Clone)]
 pub enum Value {
@@ -193,7 +206,6 @@ impl Value {
             ValueSize::Word => Value::Word(self.as_word()),
             ValueSize::Double => Value::Double(self.as_double()),
             ValueSize::Quad => Value::Quad(self.as_quad()),
-            _ => panic!("Invalid operand size."),
         }
     }
 
@@ -203,7 +215,6 @@ impl Value {
             ValueSize::Word => Value::Word(self.as_signed_word() as u16),
             ValueSize::Double => Value::Double(self.as_signed_double() as u32),
             ValueSize::Quad => Value::Quad(self.as_signed_quad() as u64),
-            _ => panic!("Invalid operand size."),
         }
     }
 }
@@ -334,9 +345,21 @@ impl From<u64> for Value {
     }
 }
 
+impl From<i64> for Value {
+    fn from(val: i64) -> Self {
+        Value::Quad(val as u64)
+    }
+}
+
 impl From<u32> for Value {
     fn from(val: u32) -> Self {
         Value::Double(val)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(val: i32) -> Self {
+        Value::Double(val as u32)
     }
 }
 
@@ -346,9 +369,21 @@ impl From<u16> for Value {
     }
 }
 
+impl From<i16> for Value {
+    fn from(val: i16) -> Self {
+        Value::Word(val as u16)
+    }
+}
+
 impl From<u8> for Value {
     fn from(val: u8) -> Self {
         Value::Byte(val)
+    }
+}
+
+impl From<i8> for Value {
+    fn from(val: i8) -> Self {
+        Value::Byte(val as u8)
     }
 }
 
@@ -357,6 +392,17 @@ pub trait IntoValue {
 }
 
 impl IntoValue for u64 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as u16),
+            ValueSize::Double => Value::Double(self as u32),
+            ValueSize::Quad => Value::Quad(self as u64),
+        }
+    }
+}
+
+impl IntoValue for i64 {
     fn into_value(self, size: ValueSize) -> Value {
         match size {
             ValueSize::Byte => Value::Byte(self as u8),
@@ -378,6 +424,17 @@ impl IntoValue for u32 {
     }
 }
 
+impl IntoValue for i32 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as u16),
+            ValueSize::Double => Value::Double(self as u32),
+            ValueSize::Quad => Value::Quad(self as i64 as u64),
+        }
+    }
+}
+
 impl IntoValue for u16 {
     fn into_value(self, size: ValueSize) -> Value {
         match size {
@@ -385,6 +442,17 @@ impl IntoValue for u16 {
             ValueSize::Word => Value::Word(self as u16),
             ValueSize::Double => Value::Double(self as u32),
             ValueSize::Quad => Value::Quad(self as u64),
+        }
+    }
+}
+
+impl IntoValue for i16 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as u16),
+            ValueSize::Double => Value::Double(self as i32 as u32),
+            ValueSize::Quad => Value::Quad(self as i64 as u64),
         }
     }
 }
@@ -400,23 +468,33 @@ impl IntoValue for u8 {
     }
 }
 
+impl IntoValue for i8 {
+    fn into_value(self, size: ValueSize) -> Value {
+        match size {
+            ValueSize::Byte => Value::Byte(self as u8),
+            ValueSize::Word => Value::Word(self as i16 as u16),
+            ValueSize::Double => Value::Double(self as i32 as u32),
+            ValueSize::Quad => Value::Quad(self as i64 as u64),
+        }
+    }
+}
+
 pub const POINTER_WIDTH: Pointer = std::mem::size_of::<Pointer>() as Pointer;
 pub const STACK_SIZE: Pointer = 4 * 1024; // 4 Kb
 pub const STACK_START: Pointer = 0x7FFFFFFFFFFFFFFF;
 
-pub enum ProgramResult {
-    Exit(u64),
-    Halt,
-}
-
 pub struct Kernel {
-    memory: SystemMemory,
+    processes: HashMap<ProcessId, Box<dyn Process>>,
+    next_pid: u64,
+    time_aliace: i64,
 }
 
 impl Kernel {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            memory: SystemMemory::new(),
+            processes: HashMap::new(),
+            next_pid: 0,
+            time_aliace: 0,
         })
     }
 
@@ -477,8 +555,7 @@ impl Kernel {
         }))
     }
 
-    fn build_stack(arguments: impl Into<Vec<String>>) -> Result<(Pointer, MemoryBlock)> {
-        let arguments = arguments.into();
+    fn build_stack(arguments: Vec<String>) -> Result<(Pointer, MemoryBlock)> {
         let memory_start = STACK_START - STACK_SIZE;
 
         let mut data = vec![0u8; STACK_SIZE as usize];
@@ -503,6 +580,7 @@ impl Kernel {
             let pointer = push(argument.as_bytes_with_nul());
             argument_pointers.push(memory_start + pointer);
         }
+        argument_pointers.reverse();
 
         // Push null aux vector.
         push(&[0u8; POINTER_WIDTH as usize * 2]); // Must end with two null words.
@@ -513,7 +591,6 @@ impl Kernel {
         // Push argv.
         // We're actually just reserving space here.
         push(&[0u8; POINTER_WIDTH as usize]); // Must end with null word.
-        argument_pointers.reverse();
         for pointer in argument_pointers {
             // Push arguments on there too.
             push(&pointer.to_le_bytes());
@@ -522,7 +599,7 @@ impl Kernel {
         // Push argc.
         push(&argument_count.to_le_bytes());
 
-        // println!("{:02x?}", data);
+        // println!("STACK {:02x?}", data);
 
         Ok((
             memory_start + stack_pointer as Pointer,
@@ -537,85 +614,149 @@ impl Kernel {
         ))
     }
 
-    pub fn execute(
+    pub fn new_process(
         &mut self,
+        mut process: Box<dyn Process>,
         executable: &Executable,
-        arguments: impl Into<Vec<String>>,
-    ) -> Result<ProgramResult> {
-        let arguments = arguments.into();
-
-        // The register file. We need to set this up.
-        let mut registers = RegisterFile::new();
+        arguments: Vec<String>,
+    ) -> Result<ProcessId> {
+        let mut memory = ProcessMemory::new();
 
         // Start by loading the executable into memory.
         for section in executable.sections.iter() {
-            self.memory.new_block(section.clone())?;
+            memory.new_block(section.clone())?;
         }
         for section in executable.blank_sections.iter() {
-            self.memory.new_blank_block(section.clone())?;
+            memory.new_blank_block(section.clone())?;
         }
 
         let (stack_pointer, stack) = Self::build_stack(arguments)?;
 
-        println!("STACK POINTER: {:08x}", stack_pointer);
-        println!("STACK RANGE: {:08x?}", stack.range());
+        memory.new_block(stack)?;
 
-        self.memory.new_block(stack)?;
-        registers.general_purpose_registers[GeneralPurposeRegister::Rsp as usize] = stack_pointer;
+        let process_id = self.next_pid;
+        self.next_pid += 1;
 
-        // This function pointer is to be reigstered with atexit(BA_OS) by the program.
-        // TODO make this actually point to something.
-        registers.general_purpose_registers[GeneralPurposeRegister::Rdx as usize] = 0xdeafbeef;
+        process.initalize(
+            process_id,
+            executable.entry_point,
+            stack_pointer,
+            0xdeafbeef,
+            memory,
+        )?;
 
-        let entry_point = executable.entry_point;
-        registers.rip = entry_point;
+        // Store it for execution later.
+        self.processes.insert(process_id, process);
+        Ok(process_id)
+    }
 
-        let mut active_instruction_block = self.memory.get_memory_block(&entry_point)?;
+    pub fn step(&mut self, instruction_quota: u64) -> Vec<(ProcessId, Pointer)> {
+        // Account for debt or overflow from the previous run cycle.
+        let total_instruction_limit = instruction_quota as i64 + self.time_aliace;
+        if total_instruction_limit > 0 {
+            // Because we're just starting out, I'm going to just hand each process the same amount of time.
+            let num_process = self.processes.len() as i64;
 
-        let mut next_indstruction = active_instruction_block.instruction_iterator(entry_point)?;
+            let (time_per_process, aliace) = (
+                total_instruction_limit / num_process,
+                total_instruction_limit % num_process,
+            );
+            // Put that aliace toward our next stepping cycle.
+            self.time_aliace = aliace;
 
-        loop {
-            let active_instruction = next_indstruction
-                .next(&active_instruction_block)
-                .ok_or(Error::EndOfExecutableBlock)?; // TODO see if there's an immediatly adjacent block where rip is pointing.
+            let mut termianted_processes = Vec::new();
 
-            match run_instruction(&self.memory, &mut registers, active_instruction)? {
-                InstructionResult::Continue => { /* Just go on your merry way! */ }
-                InstructionResult::Halt => break Ok(ProgramResult::Halt),
-                InstructionResult::Syscall => {
-                    if let Some(exit_code) = self.syscall(&mut registers)? {
-                        break Ok(ProgramResult::Exit(exit_code));
+            for (process_id, process) in self.processes.iter_mut() {
+                let mut syscall_result = None;
+
+                let mut time_to_run = time_per_process;
+
+                println!("Switch to process: {}", process_id);
+
+                loop {
+                    match process.step(time_to_run as u64, syscall_result) {
+                        Ok((result, time_underrun)) => {
+                            time_to_run = time_underrun;
+
+                            match result {
+                                StepResult::Continue => {
+                                    if time_to_run <= 0 {
+                                        // We'll exit if we're out of time.
+                                        // Make sure to add that unused time (or overused time) to our time aliace.
+                                        self.time_aliace += time_to_run;
+                                        break;
+                                    }
+                                }
+                                StepResult::InvalidInstruction => {}
+                                StepResult::Syscall(syscall_request) => {
+                                    match Self::syscall(
+                                        syscall_request,
+                                        process.memory(),
+                                        &mut termianted_processes,
+                                    ) {
+                                        Ok(result_code) => match result_code {
+                                            SyscallResult::None => syscall_result = None, // No result, but we are to continue processing.
+                                            SyscallResult::Some(result) => {
+                                                syscall_result = Some(result)
+                                            }
+                                            SyscallResult::Exit => break, // We have been requested to stop execution of this process.
+                                        },
+                                        Err(syscall_error) => {
+                                            println!("Error in syscall: {:?}", syscall_error);
+                                            termianted_processes.push((*process_id, 0xFF));
+
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            println!("Error processing instruction: {:?}", error);
+                            termianted_processes.push((*process_id, 0xFF));
+
+                            break;
+                        }
                     }
                 }
-                InstructionResult::Jump(new_address) => {
-                    active_instruction_block = self.memory.get_memory_block(&new_address)?;
-                    next_indstruction =
-                        active_instruction_block.instruction_iterator(new_address)?;
-
-                    registers.rip = new_address;
-                }
             }
+
+            // Clean up the dead processes.
+            for (process_id, _exit_code) in termianted_processes.iter() {
+                self.processes.remove(process_id);
+            }
+
+            termianted_processes
+        } else {
+            // Oh wow, we were so in debt that we couldn't even run this cycle.
+            // Just use this time to pay off our debt.
+            self.time_aliace += instruction_quota as i64;
+
+            // Nothing died, so just return an empty vector.
+            Vec::new()
         }
     }
 
-    fn syscall(&self, registers: &mut RegisterFile) -> Result<Option<u64>> {
-        let call_code = registers.general_purpose_registers[GeneralPurposeRegister::Rax as usize];
+    fn syscall(
+        request: SyscallRequest,
+        memory: &ProcessMemory,
+        terminated_process_list: &mut Vec<(ProcessId, Pointer)>,
+    ) -> Result<SyscallResult> {
+        let call_code = request.call_code;
 
         if let Some(call_code) = Sysno::new(call_code as usize) {
             match call_code {
                 Sysno::exit => {
-                    let exit_code =
-                        registers.general_purpose_registers[GeneralPurposeRegister::Rdi as usize];
+                    let exit_code = request.arguments[0];
 
-                    Ok(Some(exit_code))
+                    terminated_process_list.push((request.process_id, exit_code));
+
+                    Ok(SyscallResult::Exit)
                 }
                 Sysno::write => {
-                    let file_handle =
-                        registers.general_purpose_registers[GeneralPurposeRegister::Rdi as usize];
-                    let message_pointer =
-                        registers.general_purpose_registers[GeneralPurposeRegister::Rsi as usize];
-                    let message_length =
-                        registers.general_purpose_registers[GeneralPurposeRegister::Rdx as usize];
+                    let file_handle = request.arguments[0];
+                    let message_pointer = request.arguments[1];
+                    let message_length = request.arguments[2];
 
                     let mut file: Box<dyn std::io::Write> = match file_handle {
                         1 => Box::new(std::io::stdout()),
@@ -623,17 +764,16 @@ impl Kernel {
                         _ => panic!("Non standard file handals are not yet supported."),
                     };
 
-                    let memory_block = self.memory.get_memory_block(&message_pointer)?;
+                    let memory_block = memory.get_memory_block(&message_pointer)?;
 
                     if memory_block.is_read() {
                         let message = memory_block
                             .get_range(message_pointer..message_pointer + message_length)?;
 
-                        let bytes_written = file.write(message)?;
-                        registers.general_purpose_registers[GeneralPurposeRegister::Rax as usize] =
-                            bytes_written as u64;
+                        // FIXME: An IO error should set errno.
+                        let bytes_written = file.write(message)? as Pointer;
 
-                        Ok(None)
+                        Ok(SyscallResult::Some(bytes_written))
                     } else {
                         Err(Error::Memory(memory::Error::WrongMemoryType {
                             address: message_pointer,
