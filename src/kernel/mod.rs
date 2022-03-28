@@ -24,10 +24,7 @@ pub enum Error {
     Memory(#[from] memory::Error),
 
     #[error("CPU Error: {0}")]
-    Cpu(#[from] process::Error),
-
-    #[error("The end of the exectuable block has been reached.")]
-    EndOfExecutableBlock,
+    Process(#[from] process::Error),
 
     #[error("CString has invalid format: {0}")]
     StringFormat(#[from] std::ffi::NulError),
@@ -712,7 +709,7 @@ impl Kernel {
                             }
                         }
                         Err(error) => {
-                            println!("Error processing instruction: {:?}", error);
+                            println!("Error processing instruction: {}", error);
                             termianted_processes.push((*process_id, 0xFF));
 
                             break;

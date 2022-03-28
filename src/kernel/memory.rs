@@ -41,6 +41,25 @@ impl ProcessMemory {
         }
     }
 
+    pub fn segments(&self) -> impl Iterator<Item = (Range<Pointer>, bool, bool, bool)> + '_ {
+        self.segments.iter().map(|(s, r)| {
+            let block = r.borrow();
+            let is_read = block.is_read();
+            let is_write = block.is_write();
+            let is_executable = block.is_executable();
+
+            (
+                Range {
+                    start: *s.start_value().expect("Infinite memory region."),
+                    end: *s.end_value().expect("Infinite memory region."),
+                },
+                is_read,
+                is_write,
+                is_executable,
+            )
+        })
+    }
+
     pub fn get_memory_block(&self, address: &Pointer) -> Result<Ref<MemoryBlock>> {
         self.segments
             .get(address)
@@ -57,15 +76,18 @@ impl ProcessMemory {
             })
     }
 
-    pub fn read_random(&self, address: Pointer, size: ValueSize) -> Result<Value> {
-        let range = address..address + size.len() as Pointer;
+    pub fn read_random_bytes(&self, address: Pointer, target: &mut [u8]) -> Result<()> {
+        let length = target.len() as Pointer;
+        let range = address..address + length;
 
         let block = self.get_memory_block(&range.start)?;
 
         if block.is_read() {
             let data = block.get_range(range)?;
             // println!("READ RANDOM {:016x}: {:02x?}", address, data);
-            Ok(Value::from_bytes(data))
+
+            target.copy_from_slice(data);
+            Ok(())
         } else {
             Err(Error::WrongMemoryType {
                 address: range.start,
@@ -76,17 +98,23 @@ impl ProcessMemory {
         }
     }
 
-    pub fn write_random(&self, address: Pointer, value: Value) -> Result<()> {
+    pub fn read_random(&self, address: Pointer, size: ValueSize) -> Result<Value> {
+        let mut bytes = [0u8; 8];
+        self.read_random_bytes(address, &mut bytes[..size.len()])?;
+
+        Ok(Value::from_bytes(&bytes[..size.len()]))
+    }
+
+    pub fn write_random_bytes(&self, address: Pointer, data: &[u8]) -> Result<()> {
         let mut block = self.get_memory_block_mut(&address)?;
 
-        let data = value.to_bytes();
-        let length = value.len();
+        let length = data.len();
 
         if block.is_write() {
             let range = address..address + length as Pointer;
             let block_data = block.get_range_mut(range)?;
 
-            block_data.copy_from_slice(&data[..length]);
+            block_data.copy_from_slice(data);
 
             // println!("WRITE RANDOM {:016x}: {:02x?}", address, block_data);
 
@@ -99,6 +127,10 @@ impl ProcessMemory {
                 execute_wanted: false,
             })
         }
+    }
+
+    pub fn write_random(&self, address: Pointer, value: Value) -> Result<()> {
+        self.write_random_bytes(address, &value.to_bytes())
     }
 
     pub fn new_block(&mut self, memory_block: MemoryBlock) -> Result<()> {
@@ -214,6 +246,10 @@ impl ProcessMemory {
         }
 
         Ok(())
+    }
+
+    pub fn replace(&mut self, source: ProcessMemory) {
+        self.segments = source.segments;
     }
 }
 

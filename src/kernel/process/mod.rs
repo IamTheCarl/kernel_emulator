@@ -9,12 +9,16 @@ use super::ProcessId;
 mod unicorn_x86;
 mod x86;
 
+pub use unicorn_x86::UnicornX86Process;
 pub use x86::X86Process;
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Memory Error: {0}")]
     Memory(#[from] MemoryError),
+
+    #[error("Platform specific error: {0}")]
+    Custom(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
