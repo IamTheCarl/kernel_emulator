@@ -1,3 +1,10 @@
+// Copyright 2022 James Carl
+//
+// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
+// http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
+
 use super::{Error, Process, Result, StepResult};
 use crate::kernel::{
     memory::{Error as MemoryError, ProcessMemory},
@@ -5,10 +12,7 @@ use crate::kernel::{
 };
 use std::collections::HashMap;
 use yaxpeax_arch::{Decoder, LengthedInstruction, Reader, U8Reader};
-use yaxpeax_x86::{
-    amd64::{Opcode, RegSpec},
-    long_mode::{register_class, InstDecoder, Instruction, Operand},
-};
+use yaxpeax_x86::amd64::{register_class, InstDecoder, Instruction, Opcode, Operand, RegSpec};
 
 // #[cfg(test)]
 // mod test;

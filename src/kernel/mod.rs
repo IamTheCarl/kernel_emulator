@@ -1,3 +1,10 @@
+// Copyright 2022 James Carl
+//
+// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
+// http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
+
 use elf_rs::{Elf, ElfFile, SectionHeaderFlags, SectionType};
 use std::{collections::HashMap, ffi::CString, sync::Arc};
 use syscalls::Sysno;

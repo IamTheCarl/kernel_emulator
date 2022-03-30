@@ -1,3 +1,10 @@
+// Copyright 2022 James Carl
+//
+// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
+// http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
+
 use crate::kernel::{bytes::Bytes, Pointer, Value, ValueSize};
 use segmap::SegmentMap;
 use std::{
@@ -84,8 +91,6 @@ impl ProcessMemory {
 
         if block.is_read() {
             let data = block.get_range(range)?;
-            // println!("READ RANDOM {:016x}: {:02x?}", address, data);
-
             target.copy_from_slice(data);
             Ok(())
         } else {
@@ -102,7 +107,10 @@ impl ProcessMemory {
         let mut bytes = [0u8; 8];
         self.read_random_bytes(address, &mut bytes[..size.len()])?;
 
-        Ok(Value::from_bytes(&bytes[..size.len()]))
+        let value = Value::from_bytes(&bytes[..size.len()]);
+        // println!("READ RANDOM {:016x}: {:02x?}", address, value);
+
+        Ok(value)
     }
 
     pub fn write_random_bytes(&self, address: Pointer, data: &[u8]) -> Result<()> {
@@ -116,8 +124,6 @@ impl ProcessMemory {
 
             block_data.copy_from_slice(data);
 
-            // println!("WRITE RANDOM {:016x}: {:02x?}", address, block_data);
-
             Ok(())
         } else {
             Err(Error::WrongMemoryType {
@@ -130,6 +136,8 @@ impl ProcessMemory {
     }
 
     pub fn write_random(&self, address: Pointer, value: Value) -> Result<()> {
+        // println!("WRITE RANDOM {:016x}: {:02x?}", address, value);
+
         self.write_random_bytes(address, &value.to_bytes())
     }
 

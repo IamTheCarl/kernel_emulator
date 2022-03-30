@@ -1,3 +1,10 @@
+// Copyright 2022 James Carl
+//
+// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
+// http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
+
 use super::{Error, Process, Result, StepResult};
 use crate::kernel::{
     memory::ProcessMemory, process::Error as ProcessError, Pointer, ProcessId, SyscallRequest,
@@ -7,6 +14,8 @@ use unicorn_engine::{
     unicorn_const::{uc_error, Arch, Mode, Permission},
     InsnSysX86, RegisterX86, Unicorn,
 };
+use yaxpeax_arch::{Decoder, U8Reader};
+use yaxpeax_x86::amd64::InstDecoder;
 
 // So we can just happily return Unicorn errors.
 impl From<uc_error> for ProcessError {
@@ -106,6 +115,9 @@ impl UnicornX86Process {
         // Setup memory.
         let read_callback = move |uc: &mut Unicorn<'_, UnicornData>, address, size| {
             let size = ValueSize::new(size as u8);
+
+            println!("READ: {:016x} len {}", address, size.len());
+
             let memory = &uc.get_data().memory;
             match memory.read_random(address, size) {
                 Ok(value) => value.as_pointer(),
@@ -156,7 +168,21 @@ impl UnicornX86Process {
                 .read_random_bytes(address, &mut bytes[..size as usize]);
 
             match bytes_result {
-                Ok(_) => {}
+                Ok(_) => {
+                    let decoder = InstDecoder::minimal();
+
+                    let mut block_reader = U8Reader::new(&bytes);
+                    let instruction = decoder
+                        .decode(&mut block_reader)
+                        .expect("Unicorn passed us an invalid instruction.");
+
+                    println!(
+                        "{:08x}: {:02x?} {:->40}",
+                        address,
+                        &bytes[..size as usize],
+                        instruction
+                    );
+                }
                 Err(error) => {
                     uc.get_data_mut().error = Some(Error::Memory(error));
                     uc.emu_stop().ok();

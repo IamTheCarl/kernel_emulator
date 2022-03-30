@@ -1,7 +1,14 @@
+// Copyright 2022 James Carl
+//
+// Licensed under the Apache License, Version 2.0, <LICENSE-APACHE or
+// http://apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. This file may not be
+// copied, modified, or distributed except according to those terms.
+
 mod kernel;
 
 use kernel::*;
-use process::{UnicornX86Process, X86Process};
+use process::X86Process;
 use std::collections::{HashMap, HashSet};
 
 fn main() {
@@ -25,21 +32,21 @@ fn main() {
         let executable = Kernel::load_elf(program).unwrap();
         let process_x86 = X86Process::new();
 
-        // let process_id = system
-        //     .new_process(process_x86, &executable, vec![name.to_string()])
-        //     .unwrap();
-
-        // pid_to_name.insert(process_id, *name);
-        // processes.insert(process_id);
-
-        let process_unicorn = UnicornX86Process::new().unwrap();
-
         let process_id = system
-            .new_process(process_unicorn, &executable, vec![name.to_string()])
+            .new_process(process_x86, &executable, vec![name.to_string()])
             .unwrap();
 
         pid_to_name.insert(process_id, *name);
         processes.insert(process_id);
+
+        // let process_unicorn = UnicornX86Process::new().unwrap();
+
+        // let process_id = system
+        //     .new_process(process_unicorn, &executable, vec![name.to_string()])
+        //     .unwrap();
+
+        // pid_to_name.insert(process_id, *name);
+        // processes.insert(process_id);
     }
 
     while !processes.is_empty() {
